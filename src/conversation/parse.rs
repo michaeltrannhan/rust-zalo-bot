@@ -12,6 +12,7 @@ pub enum IntentKind {
     Today,
     Recent,
     ManualEntry,
+    EditAmount,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +55,10 @@ pub fn parse_intent(text: &str, default_currency: &str) -> Intent {
         return Intent::of(IntentKind::Discard);
     }
 
+    if let Some(intent) = parse_edit_amount(&trimmed, default_currency) {
+        return intent;
+    }
+
     if has_word(&f, "lich su") || has_word(&f, "gan day") {
         return Intent::of(IntentKind::Recent);
     }
@@ -88,6 +93,41 @@ fn slash_command(body: &str) -> Option<IntentKind> {
         .iter()
         .find(|(name, _)| *name == body)
         .map(|(_, kind)| *kind)
+}
+
+fn parse_edit_amount(text: &str, default_currency: &str) -> Option<Intent> {
+    let trimmed = trim_command_punctuation(text);
+    let folded = fold(&trimmed);
+    if folded.is_empty() {
+        return None;
+    }
+
+    let amount_token = if let Some(rest) = folded.strip_prefix("sua so tien ") {
+        rest.trim()
+    } else if let Some(rest) = folded.strip_prefix("sai so tien ") {
+        rest.trim()
+    } else if let Some(rest) = folded.strip_prefix("sua ") {
+        rest.trim()
+    } else if let Some(rest) = folded.strip_prefix("edit ") {
+        rest.trim()
+    } else if let Some(rest) = folded.strip_prefix("fix ") {
+        rest.trim()
+    } else {
+        return None;
+    };
+
+    if amount_token.is_empty() || EDIT_PHRASES.iter().any(|phrase| folded == *phrase) {
+        return None;
+    }
+
+    let (minor, currency) = parse_amount(amount_token, default_currency).ok()?;
+    Some(Intent {
+        kind: IntentKind::EditAmount,
+        amount_minor: minor,
+        currency,
+        description: String::new(),
+        amount_text: amount_token.to_string(),
+    })
 }
 
 fn parse_manual_entry(text: &str, default_currency: &str) -> Option<Intent> {

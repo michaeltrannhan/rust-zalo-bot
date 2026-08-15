@@ -1,15 +1,18 @@
 //! Application-level bridge between persistence and the pure conversation seam.
 
+use uuid::Uuid;
+
 use crate::conversation::{
     self, AccountContext, DomainCommand, LifecycleState as ConversationLifecycle, ManualDraftView,
-    PendingConfirmation, PeriodSummary, RecentExpenseLine,
+    PendingConfirmation, PendingKind, PeriodSummary, RecentExpenseLine, transaction_type_label,
 };
+use crate::receipt::ReceiptLifecycle;
 
 use super::effects::{IngressEffect, IngressEffectError};
 use super::store::{IngressError, IngressStore};
 use super::types::{
-    DecisionContext, DecisionOutput, ExpenseState, IngressOutcome, IngressRequest, LifecycleState,
-    ReplyIntent,
+    DecisionContext, DecisionOutput, ExpenseState, IngressEventKind, IngressObservation,
+    IngressOutcome, IngressRequest, LifecycleState, ReplyIntent,
 };
 
 /// Process one normalized text event through the pure conversation seam and
@@ -18,21 +21,68 @@ pub async fn process_text_command(
     store: &IngressStore,
     request: IngressRequest,
 ) -> Result<IngressOutcome, IngressError> {
-    store.process(request, decide_and_map).await
+    store
+        .process(request, IngressObservation::default(), decide_text_and_map)
+        .await
 }
 
-fn decide_and_map(context: DecisionContext) -> Result<DecisionOutput, IngressEffectError> {
+/// Process one normalized image event through the pure conversation seam and
+/// commit receipt submission plus reply intent in the ingress transaction.
+pub async fn process_image(
+    store: &IngressStore,
+    request: IngressRequest,
+    media_url: String,
+) -> Result<IngressOutcome, IngressError> {
+    if store.receipt().is_none() {
+        return Err(IngressError::new(
+            "receipt lifecycle is required for images",
+        ));
+    }
+    store
+        .process(
+            request,
+            IngressObservation {
+                event_kind: IngressEventKind::ImageReceived,
+                media_url: Some(media_url),
+            },
+            decide_image_and_map,
+        )
+        .await
+}
+
+/// Build an ingress store wired for image receipt acceptance.
+pub fn store_with_receipt(pool: sqlx::PgPool, receipt: ReceiptLifecycle) -> IngressStore {
+    IngressStore::with_receipt(pool, receipt)
+}
+
+fn decide_text_and_map(context: DecisionContext) -> Result<DecisionOutput, IngressEffectError> {
     let pending_state_version = context
         .pending_action
         .as_ref()
         .map(|pending| pending.version);
     let account = to_conversation_context(&context)?;
     let outcome = conversation::decide(&account, &context.user_text, context.now);
+    map_outcome(outcome, &context, pending_state_version)
+}
 
+fn decide_image_and_map(context: DecisionContext) -> Result<DecisionOutput, IngressEffectError> {
+    let account = to_conversation_context(&context)?;
+    let outcome = conversation::decide_image(&account, context.now);
+    map_outcome(outcome, &context, None)
+}
+
+fn map_outcome(
+    outcome: conversation::ConversationOutcome,
+    context: &DecisionContext,
+    pending_state_version: Option<i32>,
+) -> Result<DecisionOutput, IngressEffectError> {
+    let inbound_event_id = context
+        .inbound_event_id
+        .ok_or(IngressEffectError::InvalidTransition)?;
     let effects = outcome
         .commands
         .into_iter()
-        .map(|command| map_command(command, pending_state_version))
+        .map(|command| map_command(command, pending_state_version, inbound_event_id))
         .collect::<Result<Vec<_>, _>>()?;
     let reply = match outcome.replies.as_slice() {
         [] => None,
@@ -59,21 +109,66 @@ fn to_conversation_context(
     let pending = context
         .pending_action
         .as_ref()
-        .and_then(|pending| pending.expense.as_ref().map(|expense| (pending, expense)))
-        .map(|(pending, expense)| PendingConfirmation {
-            expense_id: expense.id,
-            optimistic_version: expense.version as u64,
-            expires_at: pending.expires_at,
-            draft: ManualDraftView {
-                version: expense.version as u64,
-                amount_minor: expense.amount_minor,
-                currency: expense.currency.clone(),
-                merchant: expense.description.clone(),
-                category_display: "Khác".to_string(),
-                type_label: "Chi tiêu".to_string(),
-                date_display: conversation::format_date_vn(expense.occurred_at, &context.timezone),
+        .and_then(|pending| match pending.action_type.as_str() {
+            "manual_expense_confirmation" => pending.expense.as_ref().map(|expense| {
+                (
+                    PendingKind::ManualExpense,
+                    expense.id,
+                    expense.version as u64,
+                    expense.amount_minor,
+                    expense.currency.clone(),
+                    expense.description.clone(),
+                    conversation::format_date_vn(expense.occurred_at, &context.timezone),
+                    "Khác".to_string(),
+                    "Chi tiêu".to_string(),
+                )
+            }),
+            "receipt_review" => pending.receipt_draft.as_ref().map(|draft| {
+                (
+                    PendingKind::ReceiptReview,
+                    draft.submission_id,
+                    draft.version as u64,
+                    draft.amount_minor,
+                    draft.currency.clone(),
+                    draft.merchant.clone(),
+                    conversation::format_date_vn(draft.occurred_at, &context.timezone),
+                    draft.category_display.clone(),
+                    transaction_type_label(&draft.transaction_type).to_string(),
+                )
+            }),
+            _ => None,
+        })
+        .map(
+            |(
+                kind,
+                reference_id,
+                version,
+                amount_minor,
+                currency,
+                merchant,
+                date_display,
+                category_display,
+                type_label,
+            )| PendingConfirmation {
+                kind,
+                reference_id,
+                optimistic_version: version,
+                expires_at: context
+                    .pending_action
+                    .as_ref()
+                    .expect("pending action")
+                    .expires_at,
+                draft: ManualDraftView {
+                    version,
+                    amount_minor,
+                    currency,
+                    merchant,
+                    category_display,
+                    type_label,
+                    date_display,
+                },
             },
-        });
+        );
 
     let recent_lines = context
         .recent_expenses
@@ -91,6 +186,8 @@ fn to_conversation_context(
 
     Ok(AccountContext {
         next_expense_id: context.next_expense_id,
+        next_submission_id: context.next_submission_id,
+        next_ingest_job_id: context.next_ingest_job_id,
         lifecycle,
         allowlisted: context.sender_allowed,
         default_currency: "VND".to_string(),
@@ -110,6 +207,7 @@ fn to_conversation_context(
 fn map_command(
     command: DomainCommand,
     pending_state_version: Option<i32>,
+    inbound_event_id: Uuid,
 ) -> Result<IngressEffect, IngressEffectError> {
     match command {
         DomainCommand::GrantConsent { consent_version } => {
@@ -150,6 +248,42 @@ fn map_command(
             expense_id,
             expected_version: i32::try_from(expected_version)
                 .map_err(|_| IngressEffectError::InvalidTransition)?,
+        }),
+        DomainCommand::AcceptReceiptSubmission {
+            submission_id,
+            ingest_job_id,
+        } => Ok(IngressEffect::AcceptReceiptSubmission {
+            submission_id,
+            ingest_job_id,
+            inbound_event_id,
+        }),
+        DomainCommand::ConfirmReceipt {
+            submission_id,
+            expense_id,
+            expected_draft_version,
+        } => Ok(IngressEffect::ConfirmReceipt {
+            submission_id,
+            expense_id,
+            expected_draft_version: i32::try_from(expected_draft_version)
+                .map_err(|_| IngressEffectError::InvalidTransition)?,
+        }),
+        DomainCommand::RejectReceipt {
+            submission_id,
+            expected_draft_version,
+        } => Ok(IngressEffect::RejectReceipt {
+            submission_id,
+            expected_draft_version: i32::try_from(expected_draft_version)
+                .map_err(|_| IngressEffectError::InvalidTransition)?,
+        }),
+        DomainCommand::EditReceiptAmount {
+            submission_id,
+            expected_draft_version,
+            amount_minor,
+        } => Ok(IngressEffect::EditReceiptDraft {
+            submission_id,
+            expected_draft_version: i32::try_from(expected_draft_version)
+                .map_err(|_| IngressEffectError::InvalidTransition)?,
+            amount_minor,
         }),
         DomainCommand::ClearPending => Ok(IngressEffect::ClearPendingAction {
             expected_version: pending_state_version.ok_or(IngressEffectError::NotFound)?,

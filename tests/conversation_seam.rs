@@ -6,12 +6,14 @@ use uuid::Uuid;
 use zl_expense::conversation::{
     AccountContext, AmountError, CONSENT_VERSION, ConversationOutcome, DomainCommand,
     LifecycleState, ManualDraftView, PENDING_CONFIRMATION_TTL_SECS, PendingConfirmation,
-    PeriodSummary, RecentExpenseLine, decide, format_minor, parse_amount,
+    PendingKind, PeriodSummary, RecentExpenseLine, decide, format_minor, parse_amount,
 };
 
 fn active_ctx(account_id: Uuid) -> AccountContext {
     AccountContext {
         next_expense_id: account_id,
+        next_submission_id: Uuid::new_v4(),
+        next_ingest_job_id: Uuid::new_v4(),
         lifecycle: LifecycleState::Active,
         allowlisted: true,
         default_currency: "VND".to_string(),
@@ -26,6 +28,8 @@ fn active_ctx(account_id: Uuid) -> AccountContext {
 fn pending_consent_ctx(account_id: Uuid) -> AccountContext {
     AccountContext {
         next_expense_id: account_id,
+        next_submission_id: Uuid::new_v4(),
+        next_ingest_job_id: Uuid::new_v4(),
         lifecycle: LifecycleState::PendingConsent,
         allowlisted: true,
         default_currency: "VND".to_string(),
@@ -43,7 +47,8 @@ fn sample_pending(
     now: chrono::DateTime<Utc>,
 ) -> PendingConfirmation {
     PendingConfirmation {
-        expense_id,
+        kind: PendingKind::ManualExpense,
+        reference_id: expense_id,
         optimistic_version: version,
         expires_at: now + Duration::seconds(PENDING_CONFIRMATION_TTL_SECS),
         draft: ManualDraftView {
@@ -66,6 +71,8 @@ fn first_reply(outcome: &ConversationOutcome) -> &str {
 fn allowlist_denial_is_deterministic() {
     let ctx = AccountContext {
         next_expense_id: Uuid::new_v4(),
+        next_submission_id: Uuid::new_v4(),
+        next_ingest_job_id: Uuid::new_v4(),
         lifecycle: LifecycleState::Active,
         allowlisted: false,
         default_currency: "VND".to_string(),
@@ -143,6 +150,8 @@ fn unknown_input_returns_unknown_text() {
 fn slash_today_aliases_are_diacritics_insensitive() {
     let ctx = AccountContext {
         next_expense_id: Uuid::new_v4(),
+        next_submission_id: Uuid::new_v4(),
+        next_ingest_job_id: Uuid::new_v4(),
         lifecycle: LifecycleState::Active,
         allowlisted: true,
         default_currency: "VND".to_string(),
@@ -170,6 +179,8 @@ fn slash_today_aliases_are_diacritics_insensitive() {
 fn slash_recent_and_history_aliases_match() {
     let ctx = AccountContext {
         next_expense_id: Uuid::new_v4(),
+        next_submission_id: Uuid::new_v4(),
+        next_ingest_job_id: Uuid::new_v4(),
         lifecycle: LifecycleState::Active,
         allowlisted: true,
         default_currency: "VND".to_string(),

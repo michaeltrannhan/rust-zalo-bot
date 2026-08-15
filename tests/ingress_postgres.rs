@@ -12,8 +12,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use zl_expense::db::MIGRATOR;
 use zl_expense::ingress::{
-    DecisionContext, DecisionOutput, IngressEffect, IngressOutcome, IngressRequest, IngressSource,
-    IngressStore, ReplyIntent,
+    DecisionContext, DecisionOutput, IngressEffect, IngressObservation, IngressOutcome,
+    IngressRequest, IngressSource, IngressStore, ReplyIntent,
 };
 
 async fn fresh_pool() -> PgPool {
@@ -73,7 +73,7 @@ async fn first_accept_persists_event_reply_and_account() {
     let request = base_request("evt-first", "sender-1");
 
     let outcome = store
-        .process(request, |ctx| {
+        .process(request, IngressObservation::default(), |ctx| {
             assert!(ctx.account_id.is_some());
             assert_eq!(
                 ctx.lifecycle_state.as_ref().map(|s| s.as_str()),
@@ -144,22 +144,26 @@ async fn sequential_duplicate_short_circuits_without_callback_or_outbound() {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_first = Arc::clone(&calls);
     let first = store
-        .process(request.clone(), move |_ctx| {
-            calls_first.fetch_add(1, Ordering::SeqCst);
-            Ok(DecisionOutput {
-                effects: vec![IngressEffect::ReadOnly],
-                reply: Some(ReplyIntent {
-                    body: "ok".to_string(),
-                }),
-            })
-        })
+        .process(
+            request.clone(),
+            IngressObservation::default(),
+            move |_ctx| {
+                calls_first.fetch_add(1, Ordering::SeqCst);
+                Ok(DecisionOutput {
+                    effects: vec![IngressEffect::ReadOnly],
+                    reply: Some(ReplyIntent {
+                        body: "ok".to_string(),
+                    }),
+                })
+            },
+        )
         .await
         .expect("first");
     assert!(matches!(first, IngressOutcome::Accepted { .. }));
 
     let calls_second = Arc::clone(&calls);
     let second = store
-        .process(request, move |_ctx| {
+        .process(request, IngressObservation::default(), move |_ctx| {
             calls_second.fetch_add(1, Ordering::SeqCst);
             Ok(DecisionOutput {
                 effects: vec![IngressEffect::ReadOnly],
@@ -199,7 +203,7 @@ async fn concurrent_duplicate_runs_callback_once() {
         let calls = Arc::clone(&calls);
         handles.push(tokio::spawn(async move {
             store
-                .process(request, move |_ctx| {
+                .process(request, IngressObservation::default(), move |_ctx| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok(DecisionOutput {
                         effects: vec![IngressEffect::ReadOnly],
@@ -252,7 +256,7 @@ async fn mode_mismatch_records_rejected_without_callback() {
     let calls_cb = Arc::clone(&calls);
 
     let outcome = store
-        .process(request, move |_ctx| {
+        .process(request, IngressObservation::default(), move |_ctx| {
             calls_cb.fetch_add(1, Ordering::SeqCst);
             Ok(DecisionOutput {
                 effects: vec![IngressEffect::ReadOnly],
@@ -294,15 +298,19 @@ async fn denied_sender_does_not_create_account_or_identity() {
     request.sender_allowed = false;
 
     let outcome = store
-        .process(request, |ctx: DecisionContext| {
-            assert!(ctx.account_id.is_none());
-            Ok(DecisionOutput {
-                effects: vec![IngressEffect::ReadOnly],
-                reply: Some(ReplyIntent {
-                    body: "Tài khoản chưa được cấp quyền.".to_string(),
-                }),
-            })
-        })
+        .process(
+            request,
+            IngressObservation::default(),
+            |ctx: DecisionContext| {
+                assert!(ctx.account_id.is_none());
+                Ok(DecisionOutput {
+                    effects: vec![IngressEffect::ReadOnly],
+                    reply: Some(ReplyIntent {
+                        body: "Tài khoản chưa được cấp quyền.".to_string(),
+                    }),
+                })
+            },
+        )
         .await
         .expect("process");
     assert!(matches!(outcome, IngressOutcome::Accepted { .. }));
@@ -339,7 +347,7 @@ async fn consent_and_outbound_commit_atomically() {
     let request = base_request("evt-consent", "sender-consent");
 
     store
-        .process(request, |_ctx| {
+        .process(request, IngressObservation::default(), |_ctx| {
             Ok(DecisionOutput {
                 effects: vec![IngressEffect::GrantConsent {
                     consent_version: "2026-01".to_string(),
@@ -384,23 +392,27 @@ async fn manual_draft_pending_and_confirm_flow() {
     let occurred_at = Utc::now();
     let pending_expires_at = occurred_at + chrono::Duration::minutes(15);
     store
-        .process(base_request("evt-manual", "sender-manual"), move |_ctx| {
-            Ok(DecisionOutput {
-                effects: vec![IngressEffect::CreateManualExpenseAwaitingConfirmation {
-                    expense_id,
-                    amount_minor: 150_000,
-                    currency: "VND".to_string(),
-                    description: "ăn trưa".to_string(),
-                    occurred_at,
-                    optimistic_version: 1,
-                    pending_expires_at,
-                    pending_action_type: "manual_expense_confirmation".to_string(),
-                }],
-                reply: Some(ReplyIntent {
-                    body: "Xác nhận chi 150000 VND?".to_string(),
-                }),
-            })
-        })
+        .process(
+            base_request("evt-manual", "sender-manual"),
+            IngressObservation::default(),
+            move |_ctx| {
+                Ok(DecisionOutput {
+                    effects: vec![IngressEffect::CreateManualExpenseAwaitingConfirmation {
+                        expense_id,
+                        amount_minor: 150_000,
+                        currency: "VND".to_string(),
+                        description: "ăn trưa".to_string(),
+                        occurred_at,
+                        optimistic_version: 1,
+                        pending_expires_at,
+                        pending_action_type: "manual_expense_confirmation".to_string(),
+                    }],
+                    reply: Some(ReplyIntent {
+                        body: "Xác nhận chi 150000 VND?".to_string(),
+                    }),
+                })
+            },
+        )
         .await
         .expect("draft");
 
@@ -429,22 +441,26 @@ async fn manual_draft_pending_and_confirm_flow() {
     assert_eq!(stored_expiry, pending_expires_at);
 
     store
-        .process(base_request("evt-confirm", "sender-manual"), move |_ctx| {
-            Ok(DecisionOutput {
-                effects: vec![
-                    IngressEffect::ConfirmExpense {
-                        expense_id,
-                        expected_version: 1,
-                    },
-                    IngressEffect::ClearPendingAction {
-                        expected_version: 1,
-                    },
-                ],
-                reply: Some(ReplyIntent {
-                    body: "Đã ghi".to_string(),
-                }),
-            })
-        })
+        .process(
+            base_request("evt-confirm", "sender-manual"),
+            IngressObservation::default(),
+            move |_ctx| {
+                Ok(DecisionOutput {
+                    effects: vec![
+                        IngressEffect::ConfirmExpense {
+                            expense_id,
+                            expected_version: 1,
+                        },
+                        IngressEffect::ClearPendingAction {
+                            expected_version: 1,
+                        },
+                    ],
+                    reply: Some(ReplyIntent {
+                        body: "Đã ghi".to_string(),
+                    }),
+                })
+            },
+        )
         .await
         .expect("confirm");
 
@@ -464,15 +480,19 @@ async fn manual_draft_pending_and_confirm_flow() {
     assert_eq!(pending_count, 0);
 
     store
-        .process(base_request("evt-after-clear", "sender-manual"), |ctx| {
-            assert!(ctx.pending_action.is_none());
-            Ok(DecisionOutput {
-                effects: vec![IngressEffect::ReadOnly],
-                reply: Some(ReplyIntent {
-                    body: "still healthy".to_string(),
-                }),
-            })
-        })
+        .process(
+            base_request("evt-after-clear", "sender-manual"),
+            IngressObservation::default(),
+            |ctx| {
+                assert!(ctx.pending_action.is_none());
+                Ok(DecisionOutput {
+                    effects: vec![IngressEffect::ReadOnly],
+                    reply: Some(ReplyIntent {
+                        body: "still healthy".to_string(),
+                    }),
+                })
+            },
+        )
         .await
         .expect("process after pending clear");
 }
@@ -492,6 +512,7 @@ async fn pending_version_conflict_rolls_back_entire_transaction() {
     store
         .process(
             base_request("evt-conflict-setup", "sender-conflict"),
+            IngressObservation::default(),
             move |_ctx| {
                 Ok(DecisionOutput {
                     effects: vec![IngressEffect::CreateManualExpenseAwaitingConfirmation {
@@ -516,6 +537,7 @@ async fn pending_version_conflict_rolls_back_entire_transaction() {
     let err = store
         .process(
             base_request("evt-conflict", "sender-conflict"),
+            IngressObservation::default(),
             move |_ctx| {
                 Ok(DecisionOutput {
                     effects: vec![IngressEffect::ClearPendingAction {
@@ -559,7 +581,7 @@ async fn polling_duplicate_after_mode_switch_does_not_rerun_decision() {
     let store = IngressStore::new(pool.clone());
     let request = base_request("evt-cross-ingress", "sender-cross");
     store
-        .process(request.clone(), |_| {
+        .process(request.clone(), IngressObservation::default(), |_| {
             Ok(DecisionOutput {
                 effects: vec![IngressEffect::ReadOnly],
                 reply: Some(ReplyIntent {
@@ -580,7 +602,7 @@ async fn polling_duplicate_after_mode_switch_does_not_rerun_decision() {
     let mut polling = request;
     polling.source = IngressSource::Polling;
     let outcome = store
-        .process(polling, move |_| {
+        .process(polling, IngressObservation::default(), move |_| {
             calls_cb.fetch_add(1, Ordering::SeqCst);
             Ok(DecisionOutput {
                 effects: vec![],
@@ -610,22 +632,26 @@ async fn invalid_effect_rolls_back_without_partial_domain_changes() {
     let missing_expense = Uuid::new_v4();
 
     let err = store
-        .process(base_request("evt-invalid", "sender-invalid"), move |_ctx| {
-            Ok(DecisionOutput {
-                effects: vec![
-                    IngressEffect::GrantConsent {
-                        consent_version: "v1".to_string(),
-                    },
-                    IngressEffect::ConfirmExpense {
-                        expense_id: missing_expense,
-                        expected_version: 1,
-                    },
-                ],
-                reply: Some(ReplyIntent {
-                    body: "broken".to_string(),
-                }),
-            })
-        })
+        .process(
+            base_request("evt-invalid", "sender-invalid"),
+            IngressObservation::default(),
+            move |_ctx| {
+                Ok(DecisionOutput {
+                    effects: vec![
+                        IngressEffect::GrantConsent {
+                            consent_version: "v1".to_string(),
+                        },
+                        IngressEffect::ConfirmExpense {
+                            expense_id: missing_expense,
+                            expected_version: 1,
+                        },
+                    ],
+                    reply: Some(ReplyIntent {
+                        body: "broken".to_string(),
+                    }),
+                })
+            },
+        )
         .await
         .expect_err("confirm missing expense");
     assert!(err.to_string().contains("version conflict"));

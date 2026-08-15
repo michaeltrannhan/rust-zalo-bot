@@ -19,8 +19,8 @@ use tempfile::TempDir;
 use uuid::Uuid;
 use zl_expense::db::MIGRATOR;
 use zl_expense::ingress::{
-    DecisionOutput, IngressEffect, IngressOutcome, IngressRequest, IngressSource, IngressStore,
-    ReplyIntent,
+    DecisionOutput, IngressEffect, IngressObservation, IngressOutcome, IngressRequest,
+    IngressSource, IngressStore, ReplyIntent,
 };
 
 const PROVIDER_SCOPE: &str = "zalo_bot";
@@ -131,14 +131,18 @@ async fn enqueue_reply_job(pool: &PgPool, event_id: &str) -> (Uuid, Uuid) {
 async fn enqueue_reply_job_for_sender(pool: &PgPool, event_id: &str, sender: &str) -> (Uuid, Uuid) {
     let store = IngressStore::new(pool.clone());
     let outcome = store
-        .process(ingress_request(event_id, sender), |_ctx| {
-            Ok(DecisionOutput {
-                effects: vec![IngressEffect::ReadOnly],
-                reply: Some(ReplyIntent {
-                    body: format!("reply-{event_id}"),
-                }),
-            })
-        })
+        .process(
+            ingress_request(event_id, sender),
+            IngressObservation::default(),
+            |_ctx| {
+                Ok(DecisionOutput {
+                    effects: vec![IngressEffect::ReadOnly],
+                    reply: Some(ReplyIntent {
+                        body: format!("reply-{event_id}"),
+                    }),
+                })
+            },
+        )
         .await
         .expect("process ingress");
     let inbound_event_id = match outcome {

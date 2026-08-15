@@ -15,8 +15,8 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 use zl_expense::db::MIGRATOR;
 use zl_expense::ingress::{
-    DecisionOutput, IngressEffect, IngressOutcome, IngressRequest, IngressSource, IngressStore,
-    ReplyIntent,
+    DecisionOutput, IngressEffect, IngressObservation, IngressOutcome, IngressRequest,
+    IngressSource, IngressStore, ReplyIntent,
 };
 use zl_expense::outbound::{
     DeliveryResult, DeliveryState, OutboundJobExecution, deliver_for_job, deliver_next,
@@ -98,16 +98,20 @@ fn ingress_request(event_id: &str, sender: &str, allowed: bool) -> IngressReques
 async fn accept_with_reply(pool: &PgPool, event_id: &str) -> (Uuid, Uuid) {
     let store = IngressStore::new(pool.clone());
     let outcome = store
-        .process(ingress_request(event_id, ALLOWED_SENDER, true), |_ctx| {
-            Ok(DecisionOutput {
-                effects: vec![IngressEffect::GrantConsent {
-                    consent_version: "v1".to_string(),
-                }],
-                reply: Some(ReplyIntent {
-                    body: "Chào bạn".to_string(),
-                }),
-            })
-        })
+        .process(
+            ingress_request(event_id, ALLOWED_SENDER, true),
+            IngressObservation::default(),
+            |_ctx| {
+                Ok(DecisionOutput {
+                    effects: vec![IngressEffect::GrantConsent {
+                        consent_version: "v1".to_string(),
+                    }],
+                    reply: Some(ReplyIntent {
+                        body: "Chào bạn".to_string(),
+                    }),
+                })
+            },
+        )
         .await
         .expect("process ingress");
     let inbound_event_id = match outcome {
@@ -200,6 +204,7 @@ async fn outbound_and_job_roll_back_when_ingress_transaction_aborts() {
     store
         .process(
             ingress_request("evt-setup-rollback", ALLOWED_SENDER, true),
+            IngressObservation::default(),
             move |_ctx| {
                 Ok(DecisionOutput {
                     effects: vec![IngressEffect::CreateManualExpenseAwaitingConfirmation {
@@ -224,6 +229,7 @@ async fn outbound_and_job_roll_back_when_ingress_transaction_aborts() {
     let err = store
         .process(
             ingress_request("evt-rollback", ALLOWED_SENDER, true),
+            IngressObservation::default(),
             move |_ctx| {
                 Ok(DecisionOutput {
                     effects: vec![IngressEffect::ClearPendingAction {
@@ -270,7 +276,7 @@ async fn duplicate_ingress_keeps_one_outbound_and_one_job() {
     let request = ingress_request("evt-dup-job", ALLOWED_SENDER, true);
 
     let first = store
-        .process(request.clone(), |_ctx| {
+        .process(request.clone(), IngressObservation::default(), |_ctx| {
             Ok(DecisionOutput {
                 effects: vec![IngressEffect::GrantConsent {
                     consent_version: "v1".to_string(),
@@ -285,7 +291,7 @@ async fn duplicate_ingress_keeps_one_outbound_and_one_job() {
     assert!(matches!(first, IngressOutcome::Accepted { .. }));
 
     let second = store
-        .process(request, |_ctx| {
+        .process(request, IngressObservation::default(), |_ctx| {
             Ok(DecisionOutput {
                 effects: vec![IngressEffect::GrantConsent {
                     consent_version: "v1".to_string(),
@@ -325,6 +331,7 @@ async fn denied_sender_uses_provider_chat_serialization_key() {
     store
         .process(
             ingress_request("evt-denied-serial", "blocked", false),
+            IngressObservation::default(),
             |_ctx| {
                 Ok(DecisionOutput {
                     effects: vec![IngressEffect::ReadOnly],

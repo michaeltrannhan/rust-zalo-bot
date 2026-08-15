@@ -107,6 +107,35 @@ impl std::str::FromStr for ExpenseState {
     }
 }
 
+/// Normalized ingress event kind persisted on inbound_events.kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressEventKind {
+    TextCommandEnvelope,
+    ImageReceived,
+}
+
+impl IngressEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TextCommandEnvelope => "text_command_envelope",
+            Self::ImageReceived => "image_received",
+        }
+    }
+}
+
+/// Receipt draft snapshot loaded for receipt_review pending actions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptDraftSnapshot {
+    pub submission_id: Uuid,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub merchant: String,
+    pub category_display: String,
+    pub transaction_type: String,
+    pub occurred_at: DateTime<Utc>,
+    pub version: i32,
+}
+
 /// Pending action loaded for the decision callback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingAction {
@@ -115,6 +144,7 @@ pub struct PendingAction {
     pub expires_at: DateTime<Utc>,
     pub version: i32,
     pub expense: Option<RecentExpense>,
+    pub receipt_draft: Option<ReceiptDraftSnapshot>,
 }
 
 /// Recent expense row exposed to the pure decision callback.
@@ -134,6 +164,7 @@ pub struct RecentExpense {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionContext {
     pub account_id: Option<Uuid>,
+    pub inbound_event_id: Option<Uuid>,
     pub lifecycle_state: Option<LifecycleState>,
     pub consent_version: Option<String>,
     pub pending_action: Option<PendingAction>,
@@ -146,6 +177,8 @@ pub struct DecisionContext {
     pub timezone: String,
     pub original_receipt_retention_days: u32,
     pub next_expense_id: Uuid,
+    pub next_submission_id: Uuid,
+    pub next_ingest_job_id: Uuid,
     pub now: DateTime<Utc>,
 }
 
@@ -160,6 +193,22 @@ pub struct ReplyIntent {
 pub struct DecisionOutput {
     pub effects: Vec<super::effects::IngressEffect>,
     pub reply: Option<ReplyIntent>,
+}
+
+/// Metadata observed for an ingress event that is persisted on `inbound_events`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngressObservation {
+    pub event_kind: IngressEventKind,
+    pub media_url: Option<String>,
+}
+
+impl Default for IngressObservation {
+    fn default() -> Self {
+        Self {
+            event_kind: IngressEventKind::TextCommandEnvelope,
+            media_url: None,
+        }
+    }
 }
 
 /// Normalized ingress request. User text is never persisted on the inbound event row.

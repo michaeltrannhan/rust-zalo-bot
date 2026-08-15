@@ -96,6 +96,20 @@ pub fn default_category_display() -> &'static str {
     "Khác"
 }
 
+pub fn image_received_text() -> String {
+    "Đã nhận ảnh hóa đơn. Tôi sẽ đọc và gửi lại để bạn xác nhận.".to_string()
+}
+
+pub fn transaction_type_label(transaction_type: &str) -> &'static str {
+    match transaction_type {
+        "income" => "Thu nhập",
+        "refund" => "Hoàn tiền",
+        "transfer" => "Chuyển khoản",
+        "adjustment" => "Điều chỉnh",
+        _ => "Chi tiêu",
+    }
+}
+
 pub fn default_type_label() -> &'static str {
     "Chi tiêu"
 }

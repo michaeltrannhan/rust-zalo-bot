@@ -36,6 +36,25 @@ pub enum IngressEffect {
     ClearPendingAction {
         expected_version: i32,
     },
+    AcceptReceiptSubmission {
+        submission_id: Uuid,
+        ingest_job_id: Uuid,
+        inbound_event_id: Uuid,
+    },
+    ConfirmReceipt {
+        submission_id: Uuid,
+        expense_id: Uuid,
+        expected_draft_version: i32,
+    },
+    RejectReceipt {
+        submission_id: Uuid,
+        expected_draft_version: i32,
+    },
+    EditReceiptDraft {
+        submission_id: Uuid,
+        expected_draft_version: i32,
+        amount_minor: i64,
+    },
     ReadOnly,
 }
 

@@ -8,6 +8,10 @@ use uuid::Uuid;
 pub struct AccountContext {
     /// Stable ID supplied by the application/randomness seam for a possible new draft.
     pub next_expense_id: Uuid,
+    /// Stable ID for a new receipt submission when accepting an image event.
+    pub next_submission_id: Uuid,
+    /// Stable ID for the receipt.ingest job paired with `next_submission_id`.
+    pub next_ingest_job_id: Uuid,
     pub lifecycle: LifecycleState,
     pub allowlisted: bool,
     pub default_currency: String,
@@ -19,19 +23,26 @@ pub struct AccountContext {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingKind {
+    ManualExpense,
+    ReceiptReview,
+}
+
+/// Open confirmation pending action plus the draft it targets.
+#[derive(Debug, Clone)]
+pub struct PendingConfirmation {
+    pub kind: PendingKind,
+    pub reference_id: Uuid,
+    pub optimistic_version: u64,
+    pub expires_at: DateTime<Utc>,
+    pub draft: ManualDraftView,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleState {
     PendingConsent,
     Active,
     Suspended,
-}
-
-/// Open manual-confirmation pending action plus the draft it targets.
-#[derive(Debug, Clone)]
-pub struct PendingConfirmation {
-    pub expense_id: Uuid,
-    pub optimistic_version: u64,
-    pub expires_at: DateTime<Utc>,
-    pub draft: ManualDraftView,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +114,24 @@ pub enum DomainCommand {
     RejectExpense {
         expense_id: Uuid,
         expected_version: u64,
+    },
+    AcceptReceiptSubmission {
+        submission_id: Uuid,
+        ingest_job_id: Uuid,
+    },
+    ConfirmReceipt {
+        submission_id: Uuid,
+        expense_id: Uuid,
+        expected_draft_version: u64,
+    },
+    RejectReceipt {
+        submission_id: Uuid,
+        expected_draft_version: u64,
+    },
+    EditReceiptAmount {
+        submission_id: Uuid,
+        expected_draft_version: u64,
+        amount_minor: i64,
     },
     ClearPending,
 }

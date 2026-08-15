@@ -69,8 +69,21 @@ impl ReceiptLifecycle {
         request: AcceptSubmissionRequest,
     ) -> Result<AcceptSubmissionOutcome, ReceiptError> {
         let mut tx = self.begin_tx().await?;
+        let outcome = self
+            .accept_submission_in_transaction(&mut tx, request)
+            .await?;
+        tx.commit().await.map_err(|_| dependency("commit failed"))?;
+        Ok(outcome)
+    }
+
+    /// Accept a submission inside an existing transaction without committing.
+    pub async fn accept_submission_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        request: AcceptSubmissionRequest,
+    ) -> Result<AcceptSubmissionOutcome, ReceiptError> {
         let inserted = insert_submission(
-            &mut tx,
+            tx,
             request.submission_id,
             request.account_id,
             request.inbound_event_id,
@@ -78,18 +91,17 @@ impl ReceiptLifecycle {
         .await?;
 
         if inserted {
-            return self
-                .finish_accept(
-                    tx,
-                    request.submission_id,
-                    request.account_id,
-                    request.ingest_job_id,
-                )
-                .await;
+            return finish_accept_in_transaction(
+                tx,
+                request.submission_id,
+                request.account_id,
+                request.ingest_job_id,
+            )
+            .await;
         }
 
         let existing =
-            load_existing_submission(&mut tx, request.submission_id, request.inbound_event_id)
+            load_existing_submission(tx, request.submission_id, request.inbound_event_id)
                 .await?
                 .ok_or_else(|| dependency("replay lookup failed"))?;
 
@@ -100,67 +112,245 @@ impl ReceiptLifecycle {
         }
 
         if existing.state == ReceiptState::Pending {
-            return self
-                .finish_accept(
-                    tx,
-                    existing.submission_id,
-                    existing.account_id,
-                    request.ingest_job_id,
-                )
-                .await;
+            return finish_accept_in_transaction(
+                tx,
+                existing.submission_id,
+                existing.account_id,
+                request.ingest_job_id,
+            )
+            .await;
         }
 
-        tx.commit().await.map_err(|_| dependency("commit failed"))?;
         Ok(AcceptSubmissionOutcome::Replayed {
             submission_id: existing.submission_id,
             state: existing.state,
         })
     }
 
-    async fn finish_accept(
+    /// Confirm a review-required draft inside an existing transaction without committing.
+    pub async fn confirm_in_transaction(
         &self,
-        mut tx: Transaction<'_, Postgres>,
-        submission_id: Uuid,
-        account_id: Uuid,
-        ingest_job_id: Uuid,
-    ) -> Result<AcceptSubmissionOutcome, ReceiptError> {
-        let current = load_submission_for_update(&mut tx, submission_id, account_id).await?;
-        if current.state == ReceiptState::Pending {
-            transition_state(
-                &mut tx,
-                submission_id,
-                account_id,
-                ReceiptState::Pending,
-                ReceiptState::Queued,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await?;
-        } else if current.state != ReceiptState::Queued {
-            tx.commit().await.map_err(|_| dependency("commit failed"))?;
-            return Ok(AcceptSubmissionOutcome::Replayed {
-                submission_id,
-                state: current.state,
-            });
+        tx: &mut Transaction<'_, Postgres>,
+        request: ConfirmRequest,
+    ) -> Result<ConfirmOutcome, ReceiptError> {
+        let submission =
+            load_submission_for_update(tx, request.submission_id, request.account_id).await?;
+        if submission.state == ReceiptState::Confirmed {
+            let expense_id = submission
+                .confirmed_expense_id
+                .ok_or_else(|| ReceiptError::dependency("confirmed submission missing expense"))?;
+            return Ok(ConfirmOutcome::AlreadyConfirmed { expense_id });
+        }
+        if submission.state != ReceiptState::ReviewRequired {
+            return Err(ReceiptError::conflict("submission is not awaiting review"));
         }
 
-        let outcome = enqueue_receipt_job(
+        let draft = load_draft_for_update(tx, request.submission_id, request.account_id).await?;
+        if draft.version != request.expected_draft_version {
+            return Err(ReceiptError::conflict("draft version mismatch"));
+        }
+
+        insert_confirmed_expense(
+            tx,
+            request.expense_id,
+            request.account_id,
+            request.submission_id,
+            &draft,
+        )
+        .await?;
+        let expense_id = lookup_confirmed_expense_id(tx, request.submission_id).await?;
+
+        transition_state(
+            tx,
+            request.submission_id,
+            request.account_id,
+            ReceiptState::ReviewRequired,
+            ReceiptState::Confirmed,
+            None,
+            None,
+            Some(expense_id),
+            None,
+        )
+        .await?;
+
+        Ok(ConfirmOutcome::Confirmed { expense_id })
+    }
+
+    /// Reject a review-required draft inside an existing transaction without committing.
+    pub async fn reject_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        request: RejectRequest,
+    ) -> Result<(), ReceiptError> {
+        let submission =
+            load_submission_for_update(tx, request.submission_id, request.account_id).await?;
+        if submission.state == ReceiptState::Rejected {
+            return Ok(());
+        }
+        if submission.state != ReceiptState::ReviewRequired {
+            return Err(ReceiptError::conflict("submission is not awaiting review"));
+        }
+        let draft = load_draft_for_update(tx, request.submission_id, request.account_id).await?;
+        if draft.version != request.expected_draft_version {
+            return Err(ReceiptError::conflict("draft version mismatch"));
+        }
+
+        transition_state(
+            tx,
+            request.submission_id,
+            request.account_id,
+            ReceiptState::ReviewRequired,
+            ReceiptState::Rejected,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Edit a review draft inside an existing transaction without committing.
+    pub async fn edit_draft_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        request: EditDraftRequest,
+    ) -> Result<ExpenseDraftView, ReceiptError> {
+        let submission =
+            load_submission_for_update(tx, request.submission_id, request.account_id).await?;
+        if submission.state != ReceiptState::ReviewRequired {
+            return Err(ReceiptError::conflict(
+                "draft can only be edited while review is required",
+            ));
+        }
+
+        let draft = load_draft_for_update(tx, request.submission_id, request.account_id).await?;
+        if draft.version != request.expected_version {
+            return Err(ReceiptError::conflict("draft version mismatch"));
+        }
+
+        if let Some(amount_minor) = request.amount_minor {
+            validate_amount_minor(amount_minor)?;
+        }
+        if let Some(ref currency) = request.currency {
+            validate_currency(currency)?;
+        }
+        let merchant = match request.merchant.as_deref() {
+            Some(value) => Some(validate_merchant(value)?),
+            None => None,
+        };
+        if let Some(ref category_key) = request.category_key {
+            ensure_category(tx, category_key).await?;
+        }
+
+        let mut next = draft.clone();
+        if let Some(amount_minor) = request.amount_minor
+            && amount_minor != draft.amount_minor
+        {
+            record_correction(
+                tx,
+                draft.draft_id,
+                request.submission_id,
+                "amount_minor",
+                Some(draft.amount_minor.to_string()),
+                Some(amount_minor.to_string()),
+            )
+            .await?;
+            next.amount_minor = amount_minor;
+        }
+        if let Some(currency) = request.currency
+            && currency != draft.currency
+        {
+            record_correction(
+                tx,
+                draft.draft_id,
+                request.submission_id,
+                "currency",
+                Some(draft.currency.clone()),
+                Some(currency.clone()),
+            )
+            .await?;
+            next.currency = currency;
+        }
+        if let Some(merchant) = merchant
+            && merchant != draft.merchant
+        {
+            record_correction(
+                tx,
+                draft.draft_id,
+                request.submission_id,
+                "merchant",
+                Some(draft.merchant.clone()),
+                Some(merchant.clone()),
+            )
+            .await?;
+            next.merchant = merchant;
+        }
+        if let Some(category_key) = request.category_key
+            && category_key != draft.category_key
+        {
+            record_correction(
+                tx,
+                draft.draft_id,
+                request.submission_id,
+                "category_key",
+                Some(draft.category_key.clone()),
+                Some(category_key.clone()),
+            )
+            .await?;
+            next.category_key = category_key;
+        }
+        if let Some(occurred_at) = request.occurred_at
+            && occurred_at != draft.occurred_at
+        {
+            record_correction(
+                tx,
+                draft.draft_id,
+                request.submission_id,
+                "occurred_at",
+                Some(draft.occurred_at.to_rfc3339()),
+                Some(occurred_at.to_rfc3339()),
+            )
+            .await?;
+            next.occurred_at = occurred_at;
+        }
+
+        next.version = request.expected_version;
+        update_draft(tx, &next).await?;
+        next.version += 1;
+        Ok(next)
+    }
+
+    /// Move a queued submission to `failed_permanent` for permanent validation failures.
+    pub async fn fail_queued(
+        &self,
+        submission_id: Uuid,
+        account_id: Uuid,
+        error_class: ErrorClass,
+    ) -> Result<(), ReceiptError> {
+        let mut tx = self.begin_tx().await?;
+        let current = load_submission_for_update(&mut tx, submission_id, account_id).await?;
+        if current.state == ReceiptState::FailedPermanent {
+            tx.commit().await.map_err(|_| dependency("commit failed"))?;
+            return Ok(());
+        }
+        if current.state != ReceiptState::Queued {
+            return Err(ReceiptError::conflict("submission is not queued"));
+        }
+        transition_state(
             &mut tx,
-            ingest_job_id,
-            JOB_TYPE_INGEST,
             submission_id,
             account_id,
+            ReceiptState::Queued,
+            ReceiptState::FailedPermanent,
+            Some(error_class.as_str()),
+            None,
+            None,
+            None,
         )
         .await?;
         tx.commit().await.map_err(|_| dependency("commit failed"))?;
-        match outcome {
-            EnqueueOutcome::Enqueued => Ok(AcceptSubmissionOutcome::Accepted {
-                state: ReceiptState::Queued,
-            }),
-            EnqueueOutcome::Duplicate => Ok(AcceptSubmissionOutcome::DuplicateJob),
-        }
+        Ok(())
     }
 
     pub async fn ingest(
@@ -561,190 +751,21 @@ impl ReceiptLifecycle {
         request: EditDraftRequest,
     ) -> Result<ExpenseDraftView, ReceiptError> {
         let mut tx = self.begin_tx().await?;
-        let submission =
-            load_submission_for_update(&mut tx, request.submission_id, request.account_id).await?;
-        if submission.state != ReceiptState::ReviewRequired {
-            return Err(ReceiptError::conflict(
-                "draft can only be edited while review is required",
-            ));
-        }
-
-        let draft =
-            load_draft_for_update(&mut tx, request.submission_id, request.account_id).await?;
-        if draft.version != request.expected_version {
-            return Err(ReceiptError::conflict("draft version mismatch"));
-        }
-
-        if let Some(amount_minor) = request.amount_minor {
-            validate_amount_minor(amount_minor)?;
-        }
-        if let Some(ref currency) = request.currency {
-            validate_currency(currency)?;
-        }
-        let merchant = match request.merchant.as_deref() {
-            Some(value) => Some(validate_merchant(value)?),
-            None => None,
-        };
-        if let Some(ref category_key) = request.category_key {
-            ensure_category(&mut tx, category_key).await?;
-        }
-
-        let mut next = draft.clone();
-        if let Some(amount_minor) = request.amount_minor
-            && amount_minor != draft.amount_minor
-        {
-            record_correction(
-                &mut tx,
-                draft.draft_id,
-                request.submission_id,
-                "amount_minor",
-                Some(draft.amount_minor.to_string()),
-                Some(amount_minor.to_string()),
-            )
-            .await?;
-            next.amount_minor = amount_minor;
-        }
-        if let Some(currency) = request.currency
-            && currency != draft.currency
-        {
-            record_correction(
-                &mut tx,
-                draft.draft_id,
-                request.submission_id,
-                "currency",
-                Some(draft.currency.clone()),
-                Some(currency.clone()),
-            )
-            .await?;
-            next.currency = currency;
-        }
-        if let Some(merchant) = merchant
-            && merchant != draft.merchant
-        {
-            record_correction(
-                &mut tx,
-                draft.draft_id,
-                request.submission_id,
-                "merchant",
-                Some(draft.merchant.clone()),
-                Some(merchant.clone()),
-            )
-            .await?;
-            next.merchant = merchant;
-        }
-        if let Some(category_key) = request.category_key
-            && category_key != draft.category_key
-        {
-            record_correction(
-                &mut tx,
-                draft.draft_id,
-                request.submission_id,
-                "category_key",
-                Some(draft.category_key.clone()),
-                Some(category_key.clone()),
-            )
-            .await?;
-            next.category_key = category_key;
-        }
-        if let Some(occurred_at) = request.occurred_at
-            && occurred_at != draft.occurred_at
-        {
-            record_correction(
-                &mut tx,
-                draft.draft_id,
-                request.submission_id,
-                "occurred_at",
-                Some(draft.occurred_at.to_rfc3339()),
-                Some(occurred_at.to_rfc3339()),
-            )
-            .await?;
-            next.occurred_at = occurred_at;
-        }
-
-        next.version = request.expected_version;
-        update_draft(&mut tx, &next).await?;
+        let draft = self.edit_draft_in_transaction(&mut tx, request).await?;
         tx.commit().await.map_err(|_| dependency("commit failed"))?;
-        next.version += 1;
-        Ok(next)
+        Ok(draft)
     }
 
     pub async fn confirm(&self, request: ConfirmRequest) -> Result<ConfirmOutcome, ReceiptError> {
         let mut tx = self.begin_tx().await?;
-        let submission =
-            load_submission_for_update(&mut tx, request.submission_id, request.account_id).await?;
-        if submission.state == ReceiptState::Confirmed {
-            let expense_id = submission
-                .confirmed_expense_id
-                .ok_or_else(|| ReceiptError::dependency("confirmed submission missing expense"))?;
-            tx.commit().await.map_err(|_| dependency("commit failed"))?;
-            return Ok(ConfirmOutcome::AlreadyConfirmed { expense_id });
-        }
-        if submission.state != ReceiptState::ReviewRequired {
-            return Err(ReceiptError::conflict("submission is not awaiting review"));
-        }
-
-        let draft =
-            load_draft_for_update(&mut tx, request.submission_id, request.account_id).await?;
-        if draft.version != request.expected_draft_version {
-            return Err(ReceiptError::conflict("draft version mismatch"));
-        }
-
-        insert_confirmed_expense(
-            &mut tx,
-            request.expense_id,
-            request.account_id,
-            request.submission_id,
-            &draft,
-        )
-        .await?;
-        let expense_id = lookup_confirmed_expense_id(&mut tx, request.submission_id).await?;
-
-        transition_state(
-            &mut tx,
-            request.submission_id,
-            request.account_id,
-            ReceiptState::ReviewRequired,
-            ReceiptState::Confirmed,
-            None,
-            None,
-            Some(expense_id),
-            None,
-        )
-        .await?;
-
+        let outcome = self.confirm_in_transaction(&mut tx, request).await?;
         tx.commit().await.map_err(|_| dependency("commit failed"))?;
-        Ok(ConfirmOutcome::Confirmed { expense_id })
+        Ok(outcome)
     }
 
     pub async fn reject(&self, request: RejectRequest) -> Result<(), ReceiptError> {
         let mut tx = self.begin_tx().await?;
-        let submission =
-            load_submission_for_update(&mut tx, request.submission_id, request.account_id).await?;
-        if submission.state == ReceiptState::Rejected {
-            tx.commit().await.map_err(|_| dependency("commit failed"))?;
-            return Ok(());
-        }
-        if submission.state != ReceiptState::ReviewRequired {
-            return Err(ReceiptError::conflict("submission is not awaiting review"));
-        }
-        let draft =
-            load_draft_for_update(&mut tx, request.submission_id, request.account_id).await?;
-        if draft.version != request.expected_draft_version {
-            return Err(ReceiptError::conflict("draft version mismatch"));
-        }
-
-        transition_state(
-            &mut tx,
-            request.submission_id,
-            request.account_id,
-            ReceiptState::ReviewRequired,
-            ReceiptState::Rejected,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await?;
+        self.reject_in_transaction(&mut tx, request).await?;
         tx.commit().await.map_err(|_| dependency("commit failed"))?;
         Ok(())
     }
@@ -1006,6 +1027,49 @@ enum AssetInsert {
 enum ExtractClaim {
     Proceed,
     Done(ExtractOutcome),
+}
+
+async fn finish_accept_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    submission_id: Uuid,
+    account_id: Uuid,
+    ingest_job_id: Uuid,
+) -> Result<AcceptSubmissionOutcome, ReceiptError> {
+    let current = load_submission_for_update(tx, submission_id, account_id).await?;
+    if current.state == ReceiptState::Pending {
+        transition_state(
+            tx,
+            submission_id,
+            account_id,
+            ReceiptState::Pending,
+            ReceiptState::Queued,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+    } else if current.state != ReceiptState::Queued {
+        return Ok(AcceptSubmissionOutcome::Replayed {
+            submission_id,
+            state: current.state,
+        });
+    }
+
+    let outcome = enqueue_receipt_job(
+        tx,
+        ingest_job_id,
+        JOB_TYPE_INGEST,
+        submission_id,
+        account_id,
+    )
+    .await?;
+    match outcome {
+        EnqueueOutcome::Enqueued => Ok(AcceptSubmissionOutcome::Accepted {
+            state: ReceiptState::Queued,
+        }),
+        EnqueueOutcome::Duplicate => Ok(AcceptSubmissionOutcome::DuplicateJob),
+    }
 }
 
 async fn insert_submission(

@@ -5,18 +5,23 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::receipt::{
+    AcceptSubmissionRequest, ConfirmRequest, EditDraftRequest, ReceiptLifecycle, RejectRequest,
+};
 use crate::work::{EnqueueRequest, WorkStore};
 
 use super::effects::{IngressEffect, IngressEffectError};
 use super::types::{
-    DecisionContext, DecisionOutput, ExpenseState, IngressOutcome, IngressRequest, LifecycleState,
-    PendingAction, RecentExpense, ReplyIntent,
+    DecisionContext, DecisionOutput, ExpenseState, IngressObservation, IngressOutcome,
+    IngressRequest, LifecycleState, PendingAction, ReceiptDraftSnapshot, RecentExpense,
+    ReplyIntent,
 };
 
 /// Ingress persistence and transactional orchestration.
 #[derive(Clone)]
 pub struct IngressStore {
     pool: PgPool,
+    receipt: Option<ReceiptLifecycle>,
 }
 
 /// Ingress store operational failure.
@@ -26,7 +31,7 @@ pub struct IngressError {
 }
 
 impl IngressError {
-    fn new(message: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -43,7 +48,21 @@ impl std::error::Error for IngressError {}
 
 impl IngressStore {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            receipt: None,
+        }
+    }
+
+    pub fn with_receipt(pool: PgPool, receipt: ReceiptLifecycle) -> Self {
+        Self {
+            pool,
+            receipt: Some(receipt),
+        }
+    }
+
+    pub fn receipt(&self) -> Option<&ReceiptLifecycle> {
+        self.receipt.as_ref()
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -54,6 +73,7 @@ impl IngressStore {
     pub async fn process<F>(
         &self,
         request: IngressRequest,
+        observation: IngressObservation,
         decide: F,
     ) -> Result<IngressOutcome, IngressError>
     where
@@ -73,7 +93,9 @@ impl IngressStore {
 
         let expected_mode = request.source.as_str();
         if mode != expected_mode {
-            let outcome = insert_observed_event(&mut tx, &request, "rejected", None, None).await?;
+            let outcome =
+                insert_observed_event(&mut tx, &request, &observation, "rejected", None, None)
+                    .await?;
             if matches!(outcome, IngressOutcome::Duplicate { .. }) {
                 tx.commit()
                     .await
@@ -92,7 +114,7 @@ impl IngressStore {
         }
 
         let insert_outcome =
-            insert_observed_event(&mut tx, &request, "accepted", None, None).await?;
+            insert_observed_event(&mut tx, &request, &observation, "accepted", None, None).await?;
         let inbound_event_id = match insert_outcome {
             IngressOutcome::Accepted { inbound_event_id } => inbound_event_id,
             IngressOutcome::Duplicate { inbound_event_id } => {
@@ -119,12 +141,13 @@ impl IngressStore {
         };
 
         let context = if let Some(account_id) = account_id {
-            load_decision_context(&mut tx, account_id, &request)
+            load_decision_context(&mut tx, account_id, inbound_event_id, &request)
                 .await
                 .map_err(|e| IngressError::new(e.to_string()))?
         } else {
             DecisionContext {
                 account_id: None,
+                inbound_event_id: Some(inbound_event_id),
                 lifecycle_state: None,
                 consent_version: None,
                 pending_action: None,
@@ -137,6 +160,8 @@ impl IngressStore {
                 timezone: "Asia/Ho_Chi_Minh".to_string(),
                 original_receipt_retention_days: 7,
                 next_expense_id: Uuid::new_v4(),
+                next_submission_id: Uuid::new_v4(),
+                next_ingest_job_id: Uuid::new_v4(),
                 now: request.observed_at,
             }
         };
@@ -144,9 +169,15 @@ impl IngressStore {
         let decision = decide(context).map_err(|e| IngressError::new(e.to_string()))?;
 
         if let Some(account_id) = account_id {
-            apply_effects(&mut tx, account_id, &decision.effects)
-                .await
-                .map_err(|e| IngressError::new(e.to_string()))?;
+            apply_effects(
+                &mut tx,
+                account_id,
+                inbound_event_id,
+                self.receipt.as_ref(),
+                &decision.effects,
+            )
+            .await
+            .map_err(|e| IngressError::new(e.to_string()))?;
         } else if decision
             .effects
             .iter()
@@ -183,11 +214,13 @@ impl IngressStore {
 async fn insert_observed_event(
     tx: &mut Transaction<'_, Postgres>,
     request: &IngressRequest,
+    observation: &IngressObservation,
     processing_state: &str,
     account_id: Option<Uuid>,
     processed_at: Option<DateTime<Utc>>,
 ) -> Result<IngressOutcome, IngressError> {
     let event_id = Uuid::new_v4();
+    let event_kind = observation.event_kind.as_str();
     let inserted: Option<Uuid> = if processing_state == "accepted" {
         sqlx::query_scalar(
             r#"
@@ -199,14 +232,19 @@ async fn insert_observed_event(
                 processing_state,
                 ingress_source,
                 account_id,
-                processed_at
+                processed_at,
+                media_url,
+                provider_chat_id
             )
-            VALUES ($1, $2, $3, 'text_command_envelope', 'accepted', $4, $5, $6)
+            VALUES ($1, $2, $3, $4, 'accepted', $5, $6, $7, $8, $9)
             ON CONFLICT (provider_scope, provider_event_id) DO UPDATE
             SET processing_state = 'accepted',
                 ingress_source = EXCLUDED.ingress_source,
                 account_id = EXCLUDED.account_id,
-                processed_at = EXCLUDED.processed_at
+                processed_at = EXCLUDED.processed_at,
+                kind = EXCLUDED.kind,
+                media_url = EXCLUDED.media_url,
+                provider_chat_id = EXCLUDED.provider_chat_id
             WHERE inbound_events.processing_state = 'rejected'
             RETURNING id
             "#,
@@ -214,9 +252,12 @@ async fn insert_observed_event(
         .bind(event_id)
         .bind(&request.provider_event_id)
         .bind(&request.provider_scope)
+        .bind(event_kind)
         .bind(request.source.as_str())
         .bind(account_id)
         .bind(processed_at)
+        .bind(&observation.media_url)
+        .bind(&request.provider_chat_id)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|_| IngressError::new("failed to insert or promote inbound event"))?
@@ -231,9 +272,11 @@ async fn insert_observed_event(
                 processing_state,
                 ingress_source,
                 account_id,
-                processed_at
+                processed_at,
+                media_url,
+                provider_chat_id
             )
-            VALUES ($1, $2, $3, 'text_command_envelope', $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (provider_scope, provider_event_id) DO NOTHING
             RETURNING id
             "#,
@@ -241,10 +284,13 @@ async fn insert_observed_event(
         .bind(event_id)
         .bind(&request.provider_event_id)
         .bind(&request.provider_scope)
+        .bind(event_kind)
         .bind(processing_state)
         .bind(request.source.as_str())
         .bind(account_id)
         .bind(processed_at)
+        .bind(&observation.media_url)
+        .bind(&request.provider_chat_id)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|_| IngressError::new("failed to insert inbound event"))?
@@ -324,6 +370,7 @@ async fn resolve_or_create_account(
 async fn load_decision_context(
     tx: &mut Transaction<'_, Postgres>,
     account_id: Uuid,
+    inbound_event_id: Uuid,
     request: &IngressRequest,
 ) -> Result<DecisionContext, IngressEffectError> {
     let account_row: Option<(String, Option<String>)> =
@@ -427,7 +474,9 @@ async fn load_decision_context(
         .collect();
 
     let pending_action = match pending_row {
-        Some((Some(action_type), payload_ref, Some(expires_at), version)) => {
+        Some((Some(action_type), payload_ref, Some(expires_at), version))
+            if action_type == "manual_expense_confirmation" =>
+        {
             let expense_id = payload_ref
                 .as_deref()
                 .and_then(|value| Uuid::parse_str(value).ok());
@@ -487,6 +536,27 @@ async fn load_decision_context(
                 expires_at,
                 version,
                 expense,
+                receipt_draft: None,
+            })
+        }
+        Some((Some(action_type), payload_ref, Some(expires_at), version))
+            if action_type == "receipt_review" =>
+        {
+            let submission_id = payload_ref
+                .as_deref()
+                .and_then(|value| Uuid::parse_str(value).ok());
+            let receipt_draft = if let Some(submission_id) = submission_id {
+                load_receipt_draft_snapshot(tx, account_id, submission_id).await?
+            } else {
+                None
+            };
+            Some(PendingAction {
+                action_type,
+                payload_ref,
+                expires_at,
+                version,
+                expense: None,
+                receipt_draft,
             })
         }
         _ => None,
@@ -494,6 +564,7 @@ async fn load_decision_context(
 
     Ok(DecisionContext {
         account_id: Some(account_id),
+        inbound_event_id: Some(inbound_event_id),
         lifecycle_state: Some(lifecycle),
         consent_version,
         pending_action,
@@ -506,17 +577,87 @@ async fn load_decision_context(
         timezone,
         original_receipt_retention_days: retention_days as u32,
         next_expense_id: Uuid::new_v4(),
+        next_submission_id: Uuid::new_v4(),
+        next_ingest_job_id: Uuid::new_v4(),
         now: request.observed_at,
     })
+}
+
+type ReceiptDraftRow = (
+    Uuid,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    DateTime<Utc>,
+    i32,
+);
+
+async fn load_receipt_draft_snapshot(
+    tx: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+    submission_id: Uuid,
+) -> Result<Option<ReceiptDraftSnapshot>, IngressEffectError> {
+    let row: Option<ReceiptDraftRow> = sqlx::query_as(
+        r#"
+        SELECT
+            d.submission_id,
+            d.amount_minor,
+            d.currency,
+            d.merchant,
+            c.display_name_vi,
+            d.transaction_type,
+            d.occurred_at,
+            d.version
+        FROM expense_drafts d
+        JOIN categories c ON c.key = d.category_key
+        JOIN receipt_submissions s
+          ON s.id = d.submission_id
+         AND s.account_id = d.account_id
+        WHERE d.submission_id = $1
+          AND d.account_id = $2
+          AND s.lifecycle_state = 'review_required'
+        "#,
+    )
+    .bind(submission_id)
+    .bind(account_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| IngressEffectError::InvalidTransition)?;
+
+    Ok(row.map(
+        |(
+            submission_id,
+            amount_minor,
+            currency,
+            merchant,
+            category_display,
+            transaction_type,
+            occurred_at,
+            version,
+        )| ReceiptDraftSnapshot {
+            submission_id,
+            amount_minor,
+            currency,
+            merchant,
+            category_display,
+            transaction_type,
+            occurred_at,
+            version,
+        },
+    ))
 }
 
 async fn apply_effects(
     tx: &mut Transaction<'_, Postgres>,
     account_id: Uuid,
+    inbound_event_id: Uuid,
+    receipt: Option<&ReceiptLifecycle>,
     effects: &[IngressEffect],
 ) -> Result<(), IngressEffectError> {
     for effect in effects {
-        apply_effect(tx, account_id, effect).await?;
+        apply_effect(tx, account_id, inbound_event_id, receipt, effect).await?;
     }
     Ok(())
 }
@@ -524,6 +665,8 @@ async fn apply_effects(
 async fn apply_effect(
     tx: &mut Transaction<'_, Postgres>,
     account_id: Uuid,
+    inbound_event_id: Uuid,
+    receipt: Option<&ReceiptLifecycle>,
     effect: &IngressEffect,
 ) -> Result<(), IngressEffectError> {
     match effect {
@@ -667,8 +810,98 @@ async fn apply_effect(
                 return Err(IngressEffectError::VersionConflict);
             }
         }
+        IngressEffect::AcceptReceiptSubmission {
+            submission_id,
+            ingest_job_id,
+            inbound_event_id: effect_event_id,
+        } => {
+            let receipt = receipt.ok_or(IngressEffectError::InvalidTransition)?;
+            if *effect_event_id != inbound_event_id {
+                return Err(IngressEffectError::InvalidTransition);
+            }
+            receipt
+                .accept_submission_in_transaction(
+                    tx,
+                    AcceptSubmissionRequest {
+                        submission_id: *submission_id,
+                        account_id,
+                        inbound_event_id: Some(inbound_event_id),
+                        ingest_job_id: *ingest_job_id,
+                    },
+                )
+                .await
+                .map_err(map_receipt_error)?;
+        }
+        IngressEffect::ConfirmReceipt {
+            submission_id,
+            expense_id,
+            expected_draft_version,
+        } => {
+            let receipt = receipt.ok_or(IngressEffectError::InvalidTransition)?;
+            receipt
+                .confirm_in_transaction(
+                    tx,
+                    ConfirmRequest {
+                        account_id,
+                        submission_id: *submission_id,
+                        expected_draft_version: *expected_draft_version,
+                        expense_id: *expense_id,
+                    },
+                )
+                .await
+                .map_err(map_receipt_error)?;
+        }
+        IngressEffect::RejectReceipt {
+            submission_id,
+            expected_draft_version,
+        } => {
+            let receipt = receipt.ok_or(IngressEffectError::InvalidTransition)?;
+            receipt
+                .reject_in_transaction(
+                    tx,
+                    RejectRequest {
+                        account_id,
+                        submission_id: *submission_id,
+                        expected_draft_version: *expected_draft_version,
+                    },
+                )
+                .await
+                .map_err(map_receipt_error)?;
+        }
+        IngressEffect::EditReceiptDraft {
+            submission_id,
+            expected_draft_version,
+            amount_minor,
+        } => {
+            let receipt = receipt.ok_or(IngressEffectError::InvalidTransition)?;
+            receipt
+                .edit_draft_in_transaction(
+                    tx,
+                    EditDraftRequest {
+                        account_id,
+                        submission_id: *submission_id,
+                        expected_version: *expected_draft_version,
+                        amount_minor: Some(*amount_minor),
+                        currency: None,
+                        merchant: None,
+                        category_key: None,
+                        occurred_at: None,
+                    },
+                )
+                .await
+                .map_err(map_receipt_error)?;
+        }
     }
     Ok(())
+}
+
+fn map_receipt_error(error: crate::receipt::ReceiptError) -> IngressEffectError {
+    use crate::error::ErrorClass;
+    match error.class {
+        ErrorClass::Conflict => IngressEffectError::VersionConflict,
+        ErrorClass::NotFound => IngressEffectError::NotFound,
+        _ => IngressEffectError::InvalidTransition,
+    }
 }
 
 async fn upsert_pending_action(
