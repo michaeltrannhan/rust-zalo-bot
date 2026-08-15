@@ -149,6 +149,25 @@ impl WorkStore {
                 if !acquired {
                     continue;
                 }
+                let active_lease_exists: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM jobs AS active
+                        WHERE active.serialization_key = $1
+                          AND active.state = 'leased'
+                          AND active.id <> $2
+                    )
+                    "#,
+                )
+                .bind(serialization_key)
+                .bind(candidate.id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|_| WorkError::dependency("serialization lease recheck failed"))?;
+                if active_lease_exists {
+                    continue;
+                }
             }
             if candidate.state == JobState::Leased {
                 close_open_attempt(&mut tx, candidate.id, AttemptOutcome::LostLease, None).await?;
