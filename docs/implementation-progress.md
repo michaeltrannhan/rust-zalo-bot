@@ -4,6 +4,8 @@ This checklist is the execution ledger for
 `.cursor/plans/rust_expense_bot_port_0d6549cd.plan.md`. A milestone is complete
 only when its exit proof is recorded here and the repository-level checks pass.
 
+Current paused-work handoff: `docs/engineering-handoff.md`.
+
 ## Milestones
 
 - [x] M0 — Decisions and measurable contracts
@@ -27,8 +29,24 @@ only when its exit proof is recorded here and the repository-level checks pass.
   - [x] Replies enqueue transactionally and deliver through the real loopback-tested Zalo adapter
   - [x] Sent, sending, and ambiguous outbound rows are never automatically resent
   - [x] Correct-mode retry promotes a previously mode-rejected event without duplicating it
-- [ ] M3 — Durable work depth
+- [x] M3 — Durable work depth
+  - [x] PostgreSQL durable jobs, attempts, leases, heartbeats, retry/dead state,
+        cancellation, per-account serialization, and the outbound-job bridge
+  - [x] Hardening: database-clock lease deadlines, operator cancellation fenced
+        by lease tokens, checked payload versions, redacted job summaries,
+        outbound/job association checks, ambiguity metadata
+  - [x] Supervised runtime worker executes leased jobs with bounded
+        concurrency, heartbeats, and graceful SIGTERM drain without resend
+  - [x] Concurrent-claim race root-caused (serialization-key unique violation
+        surfaced as dependency error) and fixed with a post-advisory-lock
+        recheck; 30/30 repeated concurrent rounds clean
 - [ ] M4 — Receipt-to-expense slice
+  - [x] Bounded Zalo media intake (image parsing, SSRF-hardened download)
+        integrated on `main`
+  - [x] Durable receipt lifecycle (ingest/extract/review/edit/confirm/reject/
+        retention) integrated on `main` after lead-directed corrections
+  - [ ] Vertical image-webhook-to-confirmed-expense path (ingress hook, runtime
+        job dispatch, conversation commands, acceptance tests)
 - [ ] M5 — Real extraction and object storage
 - [ ] M6 — Notifications, schedules, deletion, and insights
 - [ ] M7 — Operator depth
@@ -54,6 +72,11 @@ before or immediately after integration.
 | M2 | `m2-ingress` | `642fca0` | yes, full base diff | `62c9cbd` | Transactional ingress persistence; lead corrected constraints, mode promotion, clocks, and draft lookup in `a62d964` and `d89f59a` |
 | M2 | `m2-acceptance` | `6161716` | yes, full base diff | `24100c3` | Four independent public-seam acceptance tests; lead strengthened rejected-event recovery coverage |
 | M2 | lead integration | `9a003f5`, `d89f59a` | yes, skeptical post-merge review | same | Wired HTTP/runtime/outbound vertical slice and fixed every confirmed M2-blocking review finding |
+| M3 | lead hardening | `167be83` | yes, full staged diff | direct on `main` | Database-clock leases, operator cancel, payload-version bounds, redacted summaries, outbound association fencing |
+| M3 | `m3-runtime-worker` | `f5fe1b4` | yes, full base diff | `3803922` | Leased-job worker: bounded concurrency, heartbeats, SIGTERM drain; 7 focused runtime tests re-run by lead |
+| M3 | lead + Composer race fix | `6fb2b8d` | yes, full diff after lead root-cause | direct on `main` | Serialization-lease recheck under advisory xact lock; closes the claim race behind the `claim update failed` flake |
+| M4 | `m4-media-provider` | `e5662d9` | yes, full base diff (prior lead review) | `9b4d871` | Bounded Zalo media intake; media gate re-run by lead before commit |
+| M4 | `m4-receipt-core` | `1265c1c` | yes, Grok defect review + lead verification | `8aa83c7` | Receipt lifecycle; lead-directed corrections: retention sweep deletes objects before marking rows, edit/confirm lock order aligned |
 
 ## Validation ledger
 
@@ -72,6 +95,23 @@ before or immediately after integration.
 | M2 | `cargo clippy --all-targets --all-features -- -D warnings` | pass | No warnings |
 | M2 | `cargo fmt --all -- --check` and `git diff --check` | pass | Formatting and whitespace clean |
 | M2 | Loopback Zalo HTTP contract and vertical webhook delivery | pass | Real adapter authenticates/parses/sends with no real external network and one idempotent reply |
+| M3 | `TEST_DATABASE_URL=… cargo test --all-targets --all-features` | pass | 114 tests on combined hardening + runtime before M4 integration |
+| M3 | 15× + 40× repeated `cargo test --test durable_work concurrent` | fail then fixed | Reproduced `claim update failed` (~1/15); PostgreSQL logs showed `idx_jobs_active_serialization_key` unique violation; after `6fb2b8d` 30/30 rounds clean |
+| M3 | `cargo test --test m3_runtime_worker` | pass | 7 focused runtime tests re-run by lead in the runtime worktree |
+| M4 | Media gate (`zalo_image_parse`, `zalo_media_download`, `zalo_http_contract`) | pass | Re-run by lead in the media worktree before signing |
+| M4 | Receipt gate (lib, lifecycle+retention single-threaded, durable_work) | pass | Independently re-run by lead; re-run again after retention/lock-order corrections (24/24 incl. new rollback test) |
+| M4 | `TEST_DATABASE_URL=… cargo test --all-targets --all-features` | pass | 178 tests after each cherry-pick (`9b4d871`, `8aa83c7`); fmt/clippy/whitespace clean |
+
+## Accepted residual risks
+
+- Two extractor workers may both perform external extraction while a
+  submission is `extracting`. Persistence is idempotent, so the only cost is
+  duplicated extraction work; account-level job serialization bounds it.
+  Accepted for M4 (FakeExtractor only); revisit with a claim timestamp fence
+  when real Gemini extraction lands in M5.
+- The M4 object store is process-local memory; a worker restart between
+  `stored` and extraction loses original bytes. M5 introduces the durable
+  filesystem/S3 store required for crash recovery of originals.
 
 ## Environment-limited release gates
 

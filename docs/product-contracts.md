@@ -273,6 +273,8 @@ never expose sequential database IDs as provider idempotency keys.
 - Default original-receipt retention: **7 days** (operator may configure 1–30 days).
 - `receipt_assets.retention_deadline` drives bounded batch deletion; confirmed
   expenses and extraction metadata survive original purge.
+- Receipt media is capped at 10 MiB on the wire and 25,000,000 decoded pixels;
+  extraction input is downscaled to a 2,048-pixel maximum edge.
 - User may delete an original earlier without deleting the confirmed expense.
 - Account deletion removes object data, export artifacts, and domain rows in
   bounded batches with per-account serialization.

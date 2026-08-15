@@ -116,12 +116,15 @@ abuse cases, and the public seam or test layer that must prove the control.
 | M-02 (**E**) | DNS rebinding: first lookup public, second connect private | Resolve before connect; re-check resolved addresses; forbid private/loopback/link-local/multicast/metadata ranges on every redirect hop | Attacker-controlled DNS with short TTL | Contract test with injected resolver returning public then private |
 | M-03 (**T**) | Redirect chain to internal host | Max redirects (initial gate: 3); re-validate URL on each hop | 302 → `http://127.0.0.1/file` | Loopback mock: fourth redirect fails |
 | M-04 (**D**) | 10 GiB download | Hard byte cap on wire read (initial gate: 10 MiB); download timeout (initial gate: 15 s) | Huge Content-Length image | Contract: stream abort, `validation` |
-| M-05 (**D**) | Decompression bomb (42 KB PNG → gigapixel) | Decode only after byte cap; decoded-pixel limit before full decode; downscale for OCR path | Tiny zip-bomb style image | Security test: pixel budget exceeded → terminal `validation` |
+| M-05 (**D**) | Decompression bomb (42 KB PNG → gigapixel) | Decode only after byte cap; reject dimensions above the initial 25,000,000-pixel gate before full decode; downscale the accepted image to a 2,048-pixel maximum edge for extraction | Tiny zip-bomb style image | Security test: pixel budget exceeded → terminal `validation` |
 | M-06 (**I**) | Non-Zalo host exfiltration | Host suffix allowlist aligned to Zalo CDN domains; deny non-allowlisted hosts even if DNS is public | `photo_url` on attacker domain | Allowlist unit tests for suffix match and rejection |
 | M-07 (**T**) | MIME sniffing executes polyglot | Accept only JPEG/PNG/WEBP (initial gate); content sniff on bounded prefix | Executable disguised as image | Receipt seam: unsupported type → `unsupported` or `validation` |
 
-Legacy Go reference controls: HTTPS + Zalo CDN allowlist, DNS lookup with
-forbidden IP ranges, redirect re-validation, 10 MiB cap, 15 s timeout.
+Legacy Go reference controls: HTTPS + Zalo CDN allowlist (`zaloplatforms.com`,
+`zaloapp.com`, `zdn.vn`, `zadn.vn`, and `zapps.me`, with label-boundary suffix
+matching), DNS lookup with forbidden IP ranges, redirect re-validation, 10 MiB
+cap, and 15 s timeout. Loopback contract tests inject URL/DNS policy; production
+policy never exempts loopback or private addresses.
 
 ### 3. Credential provisioning and redaction
 
