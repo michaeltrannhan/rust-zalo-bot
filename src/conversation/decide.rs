@@ -58,7 +58,7 @@ fn handle_active(ctx: &AccountContext, text: &str, now: DateTime<Utc>) -> Conver
         if is_pending_stale(pending, now) {
             return expired_outcome(true);
         }
-        return resolve_pending(ctx, pending, &intent, now);
+        return resolve_pending(pending, &intent);
     }
 
     match intent.kind {
@@ -73,10 +73,8 @@ fn handle_active(ctx: &AccountContext, text: &str, now: DateTime<Utc>) -> Conver
 }
 
 fn resolve_pending(
-    ctx: &AccountContext,
     pending: &PendingConfirmation,
     intent: &super::parse::Intent,
-    now: DateTime<Utc>,
 ) -> ConversationOutcome {
     if pending.optimistic_version != pending.draft.version {
         return expired_outcome(true);
@@ -117,7 +115,16 @@ fn resolve_pending(
             ))],
             commands: vec![],
         },
-        IntentKind::ManualEntry => create_manual(ctx, intent, now),
+        IntentKind::ManualEntry => ConversationOutcome {
+            replies: vec![ReplyPlan::single(manual_confirmation_card(
+                &pending.draft.merchant,
+                &format_minor(pending.draft.amount_minor, &pending.draft.currency),
+                &pending.draft.date_display,
+                &pending.draft.type_label,
+                &pending.draft.category_display,
+            ))],
+            commands: vec![],
+        },
         _ => ConversationOutcome {
             replies: vec![ReplyPlan::single(manual_confirmation_card(
                 &pending.draft.merchant,

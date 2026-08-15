@@ -72,19 +72,21 @@ pub fn parse_text_webhook(
         .and_then(id_string)
         .unwrap_or_default();
 
-    if event_id.is_empty() {
+    if event_id.is_empty() || event_id.chars().count() > 256 {
         return Err(validation("message missing message_id"));
     }
-    if sender_id.is_empty() {
+    if sender_id.is_empty() || sender_id.chars().count() > 256 {
         return Err(validation("message missing from.id"));
     }
-    if chat_id.is_empty() {
+    if chat_id.is_empty() || chat_id.chars().count() > 256 {
         return Err(validation("message missing chat.id"));
     }
 
     let text = wire.text.unwrap_or_default();
-    if kind == InboundEventKind::TextReceived && text.trim().is_empty() {
-        return Err(validation("text message missing text"));
+    if kind == InboundEventKind::TextReceived
+        && (text.trim().is_empty() || text.chars().count() > 2000)
+    {
+        return Err(validation("text message has invalid length"));
     }
 
     let received_at = if wire.date != 0 {

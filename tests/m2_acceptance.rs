@@ -297,6 +297,36 @@ async fn authenticated_webhook_returns_stable_status_for_rejected_inputs() {
     .expect("mode rejected event");
     assert_eq!(rejected_state, "rejected");
 
+    let polling = IngressRequest {
+        source: IngressSource::Polling,
+        provider_scope: PROVIDER_SCOPE.to_string(),
+        provider_event_id: "evt-valid".to_string(),
+        provider_sender_id: ALLOWED_SENDER.to_string(),
+        provider_chat_id: format!("chat-{ALLOWED_SENDER}"),
+        sender_allowed: true,
+        user_text: "/start".to_string(),
+        observed_at: Utc::now(),
+    };
+    assert!(matches!(
+        process_text_command(&IngressStore::new(pool.clone()), polling)
+            .await
+            .expect("correct-mode retry"),
+        IngressOutcome::Accepted { .. }
+    ));
+    let promoted: (i64, String, String) = sqlx::query_as(
+        "SELECT COUNT(*) OVER (), processing_state, ingress_source FROM inbound_events WHERE provider_event_id = $1",
+    )
+    .bind("evt-valid")
+    .fetch_one(&pool)
+    .await
+    .expect("promoted event");
+    assert_eq!(promoted, (1, "accepted".to_string(), "polling".to_string()));
+    let outbound_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbound_messages")
+        .fetch_one(&pool)
+        .await
+        .expect("outbound count");
+    assert_eq!(outbound_count, 1);
+
     harness.abort();
 }
 

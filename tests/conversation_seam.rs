@@ -322,6 +322,18 @@ fn pending_ok_confirms_and_no_rejects() {
 }
 
 #[test]
+fn new_manual_text_does_not_orphan_an_existing_pending_draft() {
+    let expense_id = Uuid::new_v4();
+    let now = Utc.with_ymd_and_hms(2026, 8, 15, 9, 5, 0).unwrap();
+    let mut ctx = active_ctx(Uuid::new_v4());
+    ctx.pending = Some(sample_pending(expense_id, 1, now));
+
+    let outcome = decide(&ctx, "ăn trưa 80k", now);
+    assert!(first_reply(&outcome).contains("45.000 ₫"));
+    assert!(outcome.commands.is_empty());
+}
+
+#[test]
 fn confirmation_without_pending_replies_without_invalid_clear_effect() {
     let ctx = active_ctx(Uuid::new_v4());
     let outcome = decide(&ctx, "ok", Utc::now());

@@ -62,10 +62,11 @@ impl IngressStore {
             .await
             .map_err(|_| IngressError::new("failed to begin transaction"))?;
 
-        let mode: String = sqlx::query_scalar("SELECT mode FROM ingress_control WHERE id = 1")
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|_| IngressError::new("failed to read ingress mode"))?;
+        let mode: String =
+            sqlx::query_scalar("SELECT mode FROM ingress_control WHERE id = 1 FOR SHARE")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|_| IngressError::new("failed to read ingress mode"))?;
 
         let expected_mode = request.source.as_str();
         if mode != expected_mode {
@@ -184,33 +185,67 @@ async fn insert_observed_event(
     processed_at: Option<DateTime<Utc>>,
 ) -> Result<IngressOutcome, IngressError> {
     let event_id = Uuid::new_v4();
-    let inserted: Option<Uuid> = sqlx::query_scalar(
-        r#"
-        INSERT INTO inbound_events (
-            id,
-            provider_event_id,
-            provider_scope,
-            kind,
-            processing_state,
-            ingress_source,
-            account_id,
-            processed_at
+    let inserted: Option<Uuid> = if processing_state == "accepted" {
+        sqlx::query_scalar(
+            r#"
+            INSERT INTO inbound_events (
+                id,
+                provider_event_id,
+                provider_scope,
+                kind,
+                processing_state,
+                ingress_source,
+                account_id,
+                processed_at
+            )
+            VALUES ($1, $2, $3, 'text_command_envelope', 'accepted', $4, $5, $6)
+            ON CONFLICT (provider_scope, provider_event_id) DO UPDATE
+            SET processing_state = 'accepted',
+                ingress_source = EXCLUDED.ingress_source,
+                account_id = EXCLUDED.account_id,
+                processed_at = EXCLUDED.processed_at
+            WHERE inbound_events.processing_state = 'rejected'
+            RETURNING id
+            "#,
         )
-        VALUES ($1, $2, $3, 'text_command_envelope', $4, $5, $6, $7)
-        ON CONFLICT (provider_scope, provider_event_id) DO NOTHING
-        RETURNING id
-        "#,
-    )
-    .bind(event_id)
-    .bind(&request.provider_event_id)
-    .bind(&request.provider_scope)
-    .bind(processing_state)
-    .bind(request.source.as_str())
-    .bind(account_id)
-    .bind(processed_at)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| IngressError::new("failed to insert inbound event"))?;
+        .bind(event_id)
+        .bind(&request.provider_event_id)
+        .bind(&request.provider_scope)
+        .bind(request.source.as_str())
+        .bind(account_id)
+        .bind(processed_at)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| IngressError::new("failed to insert or promote inbound event"))?
+    } else {
+        sqlx::query_scalar(
+            r#"
+            INSERT INTO inbound_events (
+                id,
+                provider_event_id,
+                provider_scope,
+                kind,
+                processing_state,
+                ingress_source,
+                account_id,
+                processed_at
+            )
+            VALUES ($1, $2, $3, 'text_command_envelope', $4, $5, $6, $7)
+            ON CONFLICT (provider_scope, provider_event_id) DO NOTHING
+            RETURNING id
+            "#,
+        )
+        .bind(event_id)
+        .bind(&request.provider_event_id)
+        .bind(&request.provider_scope)
+        .bind(processing_state)
+        .bind(request.source.as_str())
+        .bind(account_id)
+        .bind(processed_at)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| IngressError::new("failed to insert inbound event"))?
+    };
 
     if let Some(id) = inserted {
         return Ok(IngressOutcome::Accepted {
@@ -329,11 +364,12 @@ async fn load_decision_context(
         FROM expenses
         WHERE account_id = $1
           AND state = 'confirmed'
-          AND (occurred_at AT TIME ZONE $2)::date = (NOW() AT TIME ZONE $2)::date
+          AND (occurred_at AT TIME ZONE $2)::date = ($3::timestamptz AT TIME ZONE $2)::date
         "#,
     )
     .bind(account_id)
     .bind(&timezone)
+    .bind(request.observed_at)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|_| IngressEffectError::InvalidTransition)?;
@@ -387,29 +423,71 @@ async fn load_decision_context(
         )
         .collect();
 
-    let pending_action = pending_row.and_then(|(action_type, payload_ref, expires_at, version)| {
-        match (action_type, expires_at) {
-            (Some(action_type), Some(expires_at)) => {
-                let expense = payload_ref
-                    .as_deref()
-                    .and_then(|value| Uuid::parse_str(value).ok())
-                    .and_then(|id| {
-                        recent_expenses
-                            .iter()
-                            .find(|expense| expense.id == id)
-                            .cloned()
-                    });
-                Some(PendingAction {
-                    action_type,
-                    payload_ref,
-                    expires_at,
-                    version,
-                    expense,
-                })
-            }
-            _ => None,
+    let pending_action = match pending_row {
+        Some((Some(action_type), payload_ref, Some(expires_at), version)) => {
+            let expense_id = payload_ref
+                .as_deref()
+                .and_then(|value| Uuid::parse_str(value).ok());
+            let expense = if let Some(expense_id) = expense_id {
+                if let Some(expense) = recent_expenses
+                    .iter()
+                    .find(|expense| expense.id == expense_id)
+                    .cloned()
+                {
+                    Some(expense)
+                } else {
+                    let row: Option<RecentExpenseRow> = sqlx::query_as(
+                        r#"
+                        SELECT id, amount_minor, currency, occurred_at, description, source, state, version
+                        FROM expenses
+                        WHERE account_id = $1 AND id = $2
+                        "#,
+                    )
+                    .bind(account_id)
+                    .bind(expense_id)
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_err(|_| IngressEffectError::InvalidTransition)?;
+                    row.and_then(
+                        |(
+                            id,
+                            amount_minor,
+                            currency,
+                            occurred_at,
+                            description,
+                            source,
+                            state,
+                            version,
+                        )| {
+                            state
+                                .parse::<ExpenseState>()
+                                .ok()
+                                .map(|expense_state| RecentExpense {
+                                    id,
+                                    amount_minor,
+                                    currency,
+                                    occurred_at,
+                                    description,
+                                    source,
+                                    state: expense_state,
+                                    version,
+                                })
+                        },
+                    )
+                }
+            } else {
+                None
+            };
+            Some(PendingAction {
+                action_type,
+                payload_ref,
+                expires_at,
+                version,
+                expense,
+            })
         }
-    });
+        _ => None,
+    };
 
     Ok(DecisionContext {
         account_id: Some(account_id),

@@ -30,7 +30,7 @@ pub struct ResolvedValue {
 }
 
 /// Fully resolved configuration ready for runtime use.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedConfig {
     pub listen_address: String,
     pub database_url: String,
@@ -46,6 +46,34 @@ pub struct ResolvedConfig {
     pub zalo_send_timeout_seconds: u64,
     pub webhook_max_body_bytes: usize,
     pub attribution: BTreeMap<String, ResolvedValue>,
+}
+
+impl std::fmt::Debug for ResolvedConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedConfig")
+            .field("listen_address", &self.listen_address)
+            .field("database_url", &"[REDACTED]")
+            .field("max_connections", &self.max_connections)
+            .field("receipt_extraction", &self.receipt_extraction)
+            .field("outbound_delivery", &self.outbound_delivery)
+            .field("original_receipt_days", &self.original_receipt_days)
+            .field("credentials_directory", &self.credentials_directory)
+            .field(
+                "allowed_provider_sender_ids",
+                &format_args!(
+                    "[REDACTED; {} entries]",
+                    self.allowed_provider_sender_ids.len()
+                ),
+            )
+            .field("bot_token_credential", &self.bot_token_credential)
+            .field("webhook_secret_credential", &self.webhook_secret_credential)
+            .field("zalo_api_base", &self.zalo_api_base)
+            .field("zalo_send_timeout_seconds", &self.zalo_send_timeout_seconds)
+            .field("webhook_max_body_bytes", &self.webhook_max_body_bytes)
+            .field("attribution", &self.attribution)
+            .finish()
+    }
 }
 
 impl ResolvedConfig {

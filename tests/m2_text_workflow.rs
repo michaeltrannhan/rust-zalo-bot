@@ -201,3 +201,66 @@ async fn duplicate_webhook_and_polling_create_one_command_and_reply() {
     assert_eq!(inbound_count, 6);
     assert_eq!(outbound_count, 6);
 }
+
+#[tokio::test]
+async fn pending_confirmation_loads_its_referenced_draft_beyond_recent_window() {
+    let Some(database_url) = common::skip_without_database(
+        "pending_confirmation_loads_its_referenced_draft_beyond_recent_window",
+    ) else {
+        return;
+    };
+    let pool = isolated_pool(&database_url).await;
+    let store = IngressStore::new(pool.clone());
+    let now = Utc::now();
+
+    process_text_command(&store, request("evt-start-window", "/start", now))
+        .await
+        .expect("start");
+    process_text_command(
+        &store,
+        request("evt-consent-window", "đồng ý", now + Duration::seconds(1)),
+    )
+    .await
+    .expect("consent");
+    process_text_command(
+        &store,
+        request("evt-manual-window", "cafe 45k", now + Duration::seconds(2)),
+    )
+    .await
+    .expect("manual");
+
+    let (account_id, draft_id): (Uuid, Uuid) =
+        sqlx::query_as("SELECT account_id, id FROM expenses WHERE state = 'awaiting_confirmation'")
+            .fetch_one(&pool)
+            .await
+            .expect("pending draft");
+    for offset in 0..10 {
+        sqlx::query(
+            r#"
+            INSERT INTO expenses (
+                id, account_id, amount_minor, currency, occurred_at, description, source, state
+            )
+            VALUES ($1, $2, 100, 'VND', $3, 'later', 'manual', 'confirmed')
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(account_id)
+        .bind(now + Duration::hours(offset + 1))
+        .execute(&pool)
+        .await
+        .expect("seed later expense");
+    }
+
+    process_text_command(
+        &store,
+        request("evt-confirm-window", "ok", now + Duration::seconds(3)),
+    )
+    .await
+    .expect("confirm referenced draft");
+    let state: String = sqlx::query_scalar("SELECT state FROM expenses WHERE id = $1")
+        .bind(draft_id)
+        .fetch_one(&pool)
+        .await
+        .expect("draft state");
+    assert_eq!(state, "confirmed");
+}

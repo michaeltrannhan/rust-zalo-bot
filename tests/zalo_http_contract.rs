@@ -241,6 +241,42 @@ fn text_event_without_text_is_validation() {
 }
 
 #[test]
+fn inbound_text_and_identifiers_are_bounded() {
+    let adapter =
+        ZaloHttpAdapter::new(test_config("http://unused", "tok", "sec")).expect("adapter");
+    let long_text = "x".repeat(2001);
+    let body = serde_json::json!({
+        "event_name": "message.text.received",
+        "message": {
+            "message_id": "m1",
+            "from": { "id": "s1" },
+            "chat": { "id": "c1" },
+            "date": 1752854400_i64,
+            "text": long_text,
+        }
+    });
+    let err = adapter
+        .parse_text_webhook(&serde_json::to_vec(&body).expect("JSON"))
+        .expect_err("oversized text");
+    assert_eq!(err.class, ErrorClass::Validation);
+
+    let body = serde_json::json!({
+        "event_name": "message.text.received",
+        "message": {
+            "message_id": "m".repeat(257),
+            "from": { "id": "s1" },
+            "chat": { "id": "c1" },
+            "date": 1752854400_i64,
+            "text": "hello",
+        }
+    });
+    let err = adapter
+        .parse_text_webhook(&serde_json::to_vec(&body).expect("JSON"))
+        .expect_err("oversized identifier");
+    assert_eq!(err.class, ErrorClass::Validation);
+}
+
+#[test]
 fn verify_webhook_secret_accepts_trimmed_match() {
     let adapter =
         ZaloHttpAdapter::new(test_config("http://unused", "tok", "s3cret-token")).expect("adapter");

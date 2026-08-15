@@ -110,7 +110,7 @@ async fn zalo_webhook_handler(
         provider_chat_id: event.chat_id,
         sender_allowed,
         user_text: event.text,
-        observed_at: chrono::Utc::now(),
+        observed_at: event.received_at,
     };
     match process_text_command(&service.store, ingress).await {
         Ok(IngressOutcome::Accepted { .. }) => status_json(StatusCode::OK, "accepted"),
