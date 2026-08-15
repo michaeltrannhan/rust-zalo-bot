@@ -421,6 +421,73 @@ async fn deliver_for_job_targets_exact_outbound_id() {
 }
 
 #[tokio::test]
+async fn deliver_for_job_rejects_corrupt_outbound_association() {
+    let _guard = common::integration_lock();
+    let Some(database_url) =
+        common::skip_without_database("deliver_for_job_rejects_corrupt_outbound_association")
+    else {
+        return;
+    };
+
+    let pool = isolated_pool(&database_url).await;
+    let (_expected_outbound_id, job_id) = accept_with_reply(&pool, "evt-corrupt-binding").await;
+    let decoy_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO outbound_messages (
+            id, idempotency_key, provider_scope, provider_target, body, state
+        )
+        VALUES ($1, $2, $3, 'decoy-chat', 'decoy', 'queued')
+        "#,
+    )
+    .bind(decoy_id)
+    .bind(format!("reply:decoy:{}", Uuid::new_v4()))
+    .bind(PROVIDER_SCOPE)
+    .execute(&pool)
+    .await
+    .expect("seed decoy");
+    sqlx::query("UPDATE jobs SET payload = jsonb_set(payload, '{outbound_id}', to_jsonb($2::text)) WHERE id = $1")
+        .bind(job_id)
+        .bind(decoy_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("corrupt job association");
+
+    let (api_base, send_count, zalo_task) = spawn_zalo_loopback().await;
+    let adapter = ZaloHttpAdapter::new(ZaloHttpConfig {
+        api_base,
+        bot_token: "test-token".to_string(),
+        webhook_secret: "secret".to_string(),
+        provider_scope: PROVIDER_SCOPE.to_string(),
+        request_timeout: Duration::from_secs(2),
+    })
+    .expect("adapter");
+    let claimed = WorkStore::new(pool.clone())
+        .claim(claim_options("worker-corrupt-binding"))
+        .await
+        .expect("claim");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, job_id);
+
+    assert_eq!(
+        deliver_for_job(&pool, &adapter, &claimed[0])
+            .await
+            .expect("reject corrupt binding"),
+        OutboundJobExecution::InvalidJob
+    );
+    assert_eq!(send_count.load(Ordering::SeqCst), 0);
+    let decoy_state: String =
+        sqlx::query_scalar("SELECT state FROM outbound_messages WHERE id = $1")
+            .bind(decoy_id)
+            .fetch_one(&pool)
+            .await
+            .expect("decoy state");
+    assert_eq!(decoy_state, "queued");
+
+    zalo_task.abort();
+}
+
+#[tokio::test]
 async fn deliver_for_job_refuses_stale_lease_after_http_effect() {
     let _guard = common::integration_lock();
     let Some(database_url) =
@@ -775,6 +842,14 @@ async fn malformed_success_response_marks_one_ambiguous_attempt() {
             .await
             .expect("attempt count");
     assert_eq!(attempt_count, 1);
+    let ambiguity_reason: String = sqlx::query_scalar(
+        "SELECT ambiguity_metadata ->> 'reason' FROM outbound_messages WHERE id = $1",
+    )
+    .bind(outbound_id)
+    .fetch_one(&pool)
+    .await
+    .expect("ambiguity reason");
+    assert_eq!(ambiguity_reason, "provider_result_ambiguous");
 
     zalo_task.abort();
 }

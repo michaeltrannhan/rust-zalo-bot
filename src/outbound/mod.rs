@@ -126,16 +126,20 @@ pub async fn deliver_for_job(
         Err(outcome) => return Ok(outcome),
     };
 
-    let row: Option<(String, String, String)> =
-        sqlx::query_as("SELECT state, provider_target, body FROM outbound_messages WHERE id = $1")
-            .bind(outbound_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| OutboundStoreError)?;
+    let row: Option<(String, String, String, String)> = sqlx::query_as(
+        "SELECT state, provider_target, body, idempotency_key FROM outbound_messages WHERE id = $1",
+    )
+    .bind(outbound_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| OutboundStoreError)?;
 
-    let Some(state) = row.map(|(state, _, _)| state) else {
+    let Some((state, _, _, idempotency_key)) = row else {
         return Ok(OutboundJobExecution::InvalidJob);
     };
+    if job.dedupe_key != format!("{OUTBOUND_DELIVER_JOB_TYPE}:{idempotency_key}") {
+        return Ok(OutboundJobExecution::InvalidJob);
+    }
 
     match state.as_str() {
         "sent" => {
@@ -372,6 +376,12 @@ async fn update_delivery(
         SET state = $2,
             provider_message_id = $3,
             last_error_class = $4,
+            ambiguity_metadata = CASE
+                WHEN $2 = 'ambiguous' THEN jsonb_build_object(
+                    'reason', 'provider_result_ambiguous'
+                )
+                ELSE NULL
+            END,
             updated_at = NOW()
         WHERE id = $1 AND state = 'sending'
         "#,
@@ -404,6 +414,12 @@ async fn update_delivery_under_lease(
         SET state = $2,
             provider_message_id = $3,
             last_error_class = $4,
+            ambiguity_metadata = CASE
+                WHEN $2 = 'ambiguous' THEN jsonb_build_object(
+                    'reason', 'provider_result_ambiguous'
+                )
+                ELSE NULL
+            END,
             updated_at = NOW()
         WHERE id = $1
           AND state = 'sending'

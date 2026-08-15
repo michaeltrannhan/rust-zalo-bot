@@ -9,13 +9,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 use zl_expense::db::MIGRATOR;
 use zl_expense::error::ErrorClass;
 use zl_expense::work::{
-    AttemptOutcome, ClaimOptions, EnqueueOutcome, EnqueueRequest, FailOutcome, JobState, WorkError,
-    WorkStore,
+    AttemptOutcome, ClaimOptions, EnqueueOutcome, EnqueueRequest, FailOutcome, JobState,
+    JobSummary, WorkError, WorkStore,
 };
 
 async fn fresh_pool() -> PgPool {
@@ -104,6 +104,16 @@ async fn enqueue_requires_versioned_payload_and_dedupes() {
         .expect_err("missing schema_version");
     assert_eq!(error.class, ErrorClass::Validation);
 
+    let overflowing = EnqueueRequest {
+        payload: json!({"schema_version": i64::MAX}),
+        ..enqueue_request("dedupe-overflow", None, 0, 0)
+    };
+    let error = store
+        .enqueue(overflowing)
+        .await
+        .expect_err("schema_version outside i32 must be rejected");
+    assert_eq!(error.class, ErrorClass::Validation);
+
     let request = enqueue_request("dedupe-1", None, 0, 0);
     let job_id = request.id;
     assert_eq!(
@@ -124,6 +134,23 @@ async fn enqueue_requires_versioned_payload_and_dedupes() {
 fn durable_work_debug_output_redacts_payload_and_keys() {
     let request = enqueue_request("private-dedupe", Some("account:private"), 0, 0);
     let rendered = format!("{request:?}");
+    assert!(!rendered.contains("private-dedupe"));
+    assert!(!rendered.contains("account:private"));
+
+    let summary = JobSummary {
+        id: request.id,
+        job_type: request.job_type,
+        payload_version: 1,
+        state: JobState::Queued,
+        priority: 0,
+        run_at: request.run_at,
+        dedupe_key: "private-dedupe".to_string(),
+        serialization_key: Some("account:private".to_string()),
+        attempt_count: 0,
+        max_attempts: 5,
+        last_error_class: None,
+    };
+    let rendered = format!("{summary:?}");
     assert!(!rendered.contains("private-dedupe"));
     assert!(!rendered.contains("account:private"));
 }
@@ -154,6 +181,58 @@ async fn enqueue_can_share_the_callers_transaction_and_roll_back() {
         .await
         .expect("count");
     assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn accepted_job_survives_pool_interruption_and_new_worker_connection() {
+    let _guard = common::integration_lock();
+    let Some(database_url) = common::skip_without_database(
+        "accepted_job_survives_pool_interruption_and_new_worker_connection",
+    ) else {
+        return;
+    };
+    let pool = fresh_pool().await;
+    let schema: String = sqlx::query_scalar("SELECT current_schema()")
+        .fetch_one(&pool)
+        .await
+        .expect("schema");
+    let request = enqueue_request("survive-reconnect", None, 0, 0);
+    let job_id = request.id;
+    WorkStore::new(pool.clone())
+        .enqueue(request)
+        .await
+        .expect("enqueue");
+    pool.close().await;
+
+    let closed_error = WorkStore::new(pool)
+        .claim(claim_options(1, "closed-pool-worker"))
+        .await
+        .expect_err("closed pool must reject claim");
+    assert_eq!(closed_error.class, ErrorClass::Dependency);
+
+    let reconnect = PgPoolOptions::new()
+        .max_connections(3)
+        .after_connect(move |connection, _| {
+            let statement = format!("SET search_path TO {schema}");
+            Box::pin(async move {
+                sqlx::query(&statement).execute(connection).await?;
+                Ok(())
+            })
+        })
+        .connect(&database_url)
+        .await
+        .expect("reconnect");
+    let store = WorkStore::new(reconnect);
+    let claimed = store
+        .claim(claim_options(1, "replacement-worker"))
+        .await
+        .expect("claim after reconnect");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, job_id);
+    store
+        .complete(job_id, claimed[0].lease_token)
+        .await
+        .expect("complete after reconnect");
 }
 
 #[tokio::test]
@@ -513,6 +592,41 @@ async fn cancellation_and_dead_recovery() {
         .await
         .expect("queued summary");
     assert_eq!(summary.state, JobState::Cancelled);
+
+    let operator_cancelled = enqueue_request("operator-cancel-leased", None, 0, 0);
+    let operator_cancelled_id = operator_cancelled.id;
+    store
+        .enqueue(operator_cancelled)
+        .await
+        .expect("enqueue operator-cancelled job");
+    let operator_lease = store
+        .claim(claim_options(1, "worker-before-operator-cancel"))
+        .await
+        .expect("claim operator-cancelled job")[0]
+        .clone();
+    store
+        .cancel_by_operator(operator_cancelled_id)
+        .await
+        .expect("operator cancel leased job");
+    assert_eq!(
+        store
+            .get_job_summary(operator_cancelled_id)
+            .await
+            .expect("operator-cancelled summary")
+            .state,
+        JobState::Cancelled
+    );
+    let attempts = store
+        .list_attempts(operator_cancelled_id)
+        .await
+        .expect("operator-cancelled attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].outcome, Some(AttemptOutcome::Cancelled));
+    let stale = store
+        .complete(operator_cancelled_id, operator_lease.lease_token)
+        .await
+        .expect_err("cancelled lease must be fenced");
+    assert_eq!(stale.class, ErrorClass::Conflict);
 
     let leased = enqueue_request("cancel-leased", None, 0, 0);
     let leased_id = leased.id;

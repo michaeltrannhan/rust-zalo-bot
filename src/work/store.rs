@@ -1,6 +1,6 @@
 //! PostgreSQL-backed durable work queue.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -132,7 +132,6 @@ impl WorkStore {
         .await
         .map_err(|_| WorkError::dependency("claim candidate selection failed"))?;
 
-        let lease_duration = Duration::seconds(options.lease_duration_secs);
         let mut claimed = Vec::with_capacity(candidates.len());
         let mut claimed_serialization_keys = HashSet::new();
 
@@ -179,37 +178,37 @@ impl WorkStore {
 
             let attempt_number = candidate.attempt_count + 1;
             let lease_token = Uuid::new_v4();
-            let lease_deadline = Utc::now() + lease_duration;
             let attempt_id = Uuid::new_v4();
 
-            let updated = sqlx::query(
+            let lease_deadline: Option<DateTime<Utc>> = sqlx::query_scalar(
                 r#"
                 UPDATE jobs
                 SET state = 'leased',
                     attempt_count = $2,
                     lease_token = $3,
                     lease_owner = $4,
-                    lease_deadline = $5,
+                    lease_deadline = NOW() + $5::bigint * INTERVAL '1 second',
                     updated_at = NOW()
                 WHERE id = $1
                   AND (
                     (state = 'queued' AND run_at <= NOW())
                     OR (state = 'leased' AND lease_deadline < NOW())
                   )
+                RETURNING lease_deadline
                 "#,
             )
             .bind(candidate.id)
             .bind(attempt_number)
             .bind(lease_token)
             .bind(&options.lease_owner)
-            .bind(lease_deadline)
-            .execute(&mut *tx)
+            .bind(options.lease_duration_secs)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(|_| WorkError::dependency("claim update failed"))?;
 
-            if updated.rows_affected() != 1 {
+            let Some(lease_deadline) = lease_deadline else {
                 continue;
-            }
+            };
 
             sqlx::query(
                 r#"
@@ -261,11 +260,10 @@ impl WorkStore {
             ));
         }
 
-        let lease_deadline = Utc::now() + Duration::seconds(lease_duration_secs);
         let updated = sqlx::query_scalar::<_, DateTime<Utc>>(
             r#"
             UPDATE jobs
-            SET lease_deadline = $3,
+            SET lease_deadline = NOW() + $3::bigint * INTERVAL '1 second',
                 updated_at = NOW()
             WHERE id = $1
               AND lease_token = $2
@@ -276,7 +274,7 @@ impl WorkStore {
         )
         .bind(job_id)
         .bind(lease_token)
-        .bind(lease_deadline)
+        .bind(lease_duration_secs)
         .fetch_optional(&self.pool)
         .await
         .map_err(|_| WorkError::dependency("heartbeat failed"))?;
@@ -373,12 +371,11 @@ impl WorkStore {
         let retry = is_retryable(error_class) && row.attempt_count < row.max_attempts;
         let outcome = if retry {
             let delay_secs = retry_delay_secs(row.attempt_count);
-            let run_at = Utc::now() + Duration::seconds(delay_secs);
             sqlx::query(
                 r#"
                 UPDATE jobs
                 SET state = 'queued',
-                    run_at = $2,
+                    run_at = NOW() + $2::bigint * INTERVAL '1 second',
                     lease_token = NULL,
                     lease_owner = NULL,
                     lease_deadline = NULL,
@@ -390,7 +387,7 @@ impl WorkStore {
                 "#,
             )
             .bind(job_id)
-            .bind(run_at)
+            .bind(delay_secs)
             .bind(error_class_str)
             .bind(lease_token)
             .execute(&mut *tx)
@@ -429,6 +426,23 @@ impl WorkStore {
     }
 
     pub async fn cancel(&self, job_id: Uuid, lease_token: Option<Uuid>) -> Result<(), WorkError> {
+        self.cancel_active(job_id, lease_token, false).await
+    }
+
+    /// Cancel active work from an operator surface without requiring the worker's lease secret.
+    ///
+    /// Cancelling a leased job invalidates its lease and closes the open attempt, so a worker
+    /// finishing concurrently is fenced by the normal lease-token checks.
+    pub async fn cancel_by_operator(&self, job_id: Uuid) -> Result<(), WorkError> {
+        self.cancel_active(job_id, None, true).await
+    }
+
+    async fn cancel_active(
+        &self,
+        job_id: Uuid,
+        lease_token: Option<Uuid>,
+        operator_override: bool,
+    ) -> Result<(), WorkError> {
         let mut tx = self
             .pool
             .begin()
@@ -468,31 +482,50 @@ impl WorkStore {
                 .map_err(|_| WorkError::dependency("cancel queued update failed"))?;
             }
             "leased" => {
-                let Some(token) = lease_token else {
-                    return Err(WorkError::validation(
-                        "leased cancellation requires the current lease token",
-                    ));
+                let updated = if operator_override {
+                    sqlx::query(
+                        r#"
+                        UPDATE jobs
+                        SET state = 'cancelled',
+                            lease_token = NULL,
+                            lease_owner = NULL,
+                            lease_deadline = NULL,
+                            completed_at = NOW(),
+                            updated_at = NOW()
+                        WHERE id = $1 AND state = 'leased'
+                        "#,
+                    )
+                    .bind(job_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|_| WorkError::dependency("operator cancel update failed"))?
+                } else {
+                    let Some(token) = lease_token else {
+                        return Err(WorkError::validation(
+                            "leased cancellation requires the current lease token",
+                        ));
+                    };
+                    sqlx::query(
+                        r#"
+                        UPDATE jobs
+                        SET state = 'cancelled',
+                            lease_token = NULL,
+                            lease_owner = NULL,
+                            lease_deadline = NULL,
+                            completed_at = NOW(),
+                            updated_at = NOW()
+                        WHERE id = $1
+                          AND lease_token = $2
+                          AND state = 'leased'
+                          AND lease_deadline >= NOW()
+                        "#,
+                    )
+                    .bind(job_id)
+                    .bind(token)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|_| WorkError::dependency("cancel leased update failed"))?
                 };
-                let updated = sqlx::query(
-                    r#"
-                    UPDATE jobs
-                    SET state = 'cancelled',
-                        lease_token = NULL,
-                        lease_owner = NULL,
-                        lease_deadline = NULL,
-                        completed_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = $1
-                      AND lease_token = $2
-                      AND state = 'leased'
-                      AND lease_deadline >= NOW()
-                    "#,
-                )
-                .bind(job_id)
-                .bind(token)
-                .execute(&mut *tx)
-                .await
-                .map_err(|_| WorkError::dependency("cancel leased update failed"))?;
 
                 if updated.rows_affected() != 1 {
                     return Err(WorkError::conflict(
@@ -604,7 +637,7 @@ fn payload_version(payload: &serde_json::Value) -> Result<i32, WorkError> {
         .get("schema_version")
         .and_then(|value| value.as_i64())
         .filter(|value| *value > 0)
-        .map(|value| value as i32)
+        .and_then(|value| i32::try_from(value).ok())
         .ok_or_else(|| WorkError::validation("payload must include positive schema_version"))
 }
 

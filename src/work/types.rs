@@ -109,7 +109,7 @@ impl std::fmt::Debug for ClaimedJob {
 }
 
 /// Redacted job summary for logging and operator views.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct JobSummary {
     pub id: Uuid,
     pub job_type: String,
@@ -122,6 +122,28 @@ pub struct JobSummary {
     pub attempt_count: i32,
     pub max_attempts: i32,
     pub last_error_class: Option<String>,
+}
+
+impl std::fmt::Debug for JobSummary {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("JobSummary")
+            .field("id", &self.id)
+            .field("job_type", &self.job_type)
+            .field("payload_version", &self.payload_version)
+            .field("state", &self.state)
+            .field("priority", &self.priority)
+            .field("run_at", &self.run_at)
+            .field("dedupe_key", &"[REDACTED]")
+            .field(
+                "serialization_key",
+                &self.serialization_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("attempt_count", &self.attempt_count)
+            .field("max_attempts", &self.max_attempts)
+            .field("last_error_class", &self.last_error_class)
+            .finish()
+    }
 }
 
 /// Redacted attempt audit row — never includes payload content.
