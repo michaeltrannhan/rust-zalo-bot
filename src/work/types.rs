@@ -8,15 +8,25 @@ use uuid::Uuid;
 use crate::error::ErrorClass;
 
 /// Minimum fields every job payload must carry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionedPayload {
     pub schema_version: i32,
     #[serde(flatten)]
     pub body: Value,
 }
 
+impl std::fmt::Debug for VersionedPayload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VersionedPayload")
+            .field("schema_version", &self.schema_version)
+            .field("body", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Input for enqueueing one durable job.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EnqueueRequest {
     pub id: Uuid,
     pub job_type: String,
@@ -26,6 +36,25 @@ pub struct EnqueueRequest {
     pub priority: i32,
     pub run_at: DateTime<Utc>,
     pub max_attempts: i32,
+}
+
+impl std::fmt::Debug for EnqueueRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EnqueueRequest")
+            .field("id", &self.id)
+            .field("job_type", &self.job_type)
+            .field("payload", &"[REDACTED]")
+            .field("dedupe_key", &"[REDACTED]")
+            .field(
+                "serialization_key",
+                &self.serialization_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("priority", &self.priority)
+            .field("run_at", &self.run_at)
+            .field("max_attempts", &self.max_attempts)
+            .finish()
+    }
 }
 
 /// Result of an enqueue attempt.
@@ -44,7 +73,7 @@ pub struct ClaimOptions {
 }
 
 /// A leased job ready for execution.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ClaimedJob {
     pub id: Uuid,
     pub job_type: String,
@@ -56,6 +85,27 @@ pub struct ClaimedJob {
     pub lease_deadline: DateTime<Utc>,
     pub dedupe_key: String,
     pub serialization_key: Option<String>,
+}
+
+impl std::fmt::Debug for ClaimedJob {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClaimedJob")
+            .field("id", &self.id)
+            .field("job_type", &self.job_type)
+            .field("payload", &"[REDACTED]")
+            .field("payload_version", &self.payload_version)
+            .field("attempt_number", &self.attempt_number)
+            .field("lease_token", &"[REDACTED]")
+            .field("lease_owner", &self.lease_owner)
+            .field("lease_deadline", &self.lease_deadline)
+            .field("dedupe_key", &"[REDACTED]")
+            .field(
+                "serialization_key",
+                &self.serialization_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 /// Redacted job summary for logging and operator views.

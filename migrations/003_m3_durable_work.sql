@@ -41,7 +41,7 @@ CREATE TABLE jobs (
 CREATE UNIQUE INDEX idx_jobs_dedupe_key ON jobs (dedupe_key);
 
 CREATE UNIQUE INDEX idx_jobs_active_serialization_key ON jobs (serialization_key)
-WHERE serialization_key IS NOT NULL AND state IN ('queued', 'leased');
+WHERE serialization_key IS NOT NULL AND state = 'leased';
 
 CREATE INDEX idx_jobs_claim ON jobs (priority DESC, run_at ASC, created_at ASC)
 WHERE state IN ('queued', 'leased');

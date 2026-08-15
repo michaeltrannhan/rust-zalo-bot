@@ -119,6 +119,42 @@ async fn enqueue_requires_versioned_payload_and_dedupes() {
     assert_eq!(summary.state, JobState::Queued);
 }
 
+#[test]
+fn durable_work_debug_output_redacts_payload_and_keys() {
+    let request = enqueue_request("private-dedupe", Some("account:private"), 0, 0);
+    let rendered = format!("{request:?}");
+    assert!(!rendered.contains("private-dedupe"));
+    assert!(!rendered.contains("account:private"));
+}
+
+#[tokio::test]
+async fn enqueue_can_share_the_callers_transaction_and_roll_back() {
+    let _guard = common::integration_lock();
+    let Some(_) =
+        common::skip_without_database("enqueue_can_share_the_callers_transaction_and_roll_back")
+    else {
+        return;
+    };
+    let pool = fresh_pool().await;
+    let request = enqueue_request("transactional", None, 0, 0);
+    let job_id = request.id;
+    let mut tx = pool.begin().await.expect("begin");
+    assert_eq!(
+        WorkStore::enqueue_in_transaction(&mut tx, request)
+            .await
+            .expect("enqueue in transaction"),
+        EnqueueOutcome::Enqueued
+    );
+    tx.rollback().await.expect("rollback");
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(count, 0);
+}
+
 #[tokio::test]
 async fn claim_orders_by_priority_and_run_at_with_bounded_batch() {
     let _guard = common::integration_lock();
@@ -214,35 +250,31 @@ async fn serialization_key_allows_one_active_job_with_concurrent_claimers() {
         .enqueue(enqueue_request("job-a", Some("account:1"), 0, 0))
         .await
         .expect("enqueue first");
-
-    let second = enqueue_request("job-b", Some("account:1"), 0, 0);
-    let conflict = store
-        .enqueue(second)
+    store
+        .enqueue(enqueue_request("job-b", Some("account:1"), 0, 0))
         .await
-        .expect_err("serialization conflict");
-    assert_eq!(conflict.class, ErrorClass::Conflict);
+        .expect("queue second serialized job");
+    store
+        .enqueue(enqueue_request("job-c", Some("account:1"), 0, 0))
+        .await
+        .expect("queue third serialized job");
 
     let claimed = store
-        .claim(claim_options(1, "worker-a"))
+        .claim(claim_options(10, "worker-a"))
         .await
         .expect("claim first");
     assert_eq!(claimed.len(), 1);
 
     let still_blocked = store
-        .enqueue(enqueue_request("job-c", Some("account:1"), 0, 0))
+        .claim(claim_options(10, "worker-b"))
         .await
-        .expect_err("still serialized");
-    assert_eq!(still_blocked.class, ErrorClass::Conflict);
+        .expect("serialized claim blocked");
+    assert!(still_blocked.is_empty());
 
     store
         .complete(claimed[0].id, claimed[0].lease_token)
         .await
         .expect("complete first");
-
-    store
-        .enqueue(enqueue_request("job-d", Some("account:1"), 0, 0))
-        .await
-        .expect("enqueue after completion");
 
     let successes = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
@@ -485,7 +517,18 @@ async fn cancellation_and_dead_recovery() {
         .await
         .expect("recovered summary");
     assert_eq!(recovered.state, JobState::Queued);
-    assert_eq!(recovered.attempt_count, 0);
+    assert_eq!(recovered.attempt_count, 1);
+
+    let reclaimed = store
+        .claim(claim_options(1, "worker-after-recovery"))
+        .await
+        .expect("claim recovered job");
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].attempt_number, 2);
+    store
+        .complete(reclaimed[0].id, reclaimed[0].lease_token)
+        .await
+        .expect("complete recovered job");
 }
 
 #[tokio::test]

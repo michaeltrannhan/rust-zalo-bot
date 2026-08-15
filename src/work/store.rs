@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::error::ErrorClass;
@@ -28,17 +29,24 @@ impl WorkStore {
     }
 
     pub async fn enqueue(&self, request: EnqueueRequest) -> Result<EnqueueOutcome, WorkError> {
-        let payload_version = payload_version(&request.payload)?;
-        if request.max_attempts <= 0 {
-            return Err(WorkError::validation("max_attempts must be positive"));
-        }
-        if request.job_type.is_empty() {
-            return Err(WorkError::validation("job_type must not be empty"));
-        }
-        if request.dedupe_key.is_empty() {
-            return Err(WorkError::validation("dedupe_key must not be empty"));
-        }
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| WorkError::dependency("failed to begin enqueue transaction"))?;
+        let outcome = Self::enqueue_in_transaction(&mut tx, request).await?;
+        tx.commit()
+            .await
+            .map_err(|_| WorkError::dependency("enqueue commit failed"))?;
+        Ok(outcome)
+    }
 
+    /// Enqueue inside the caller's domain transaction.
+    pub async fn enqueue_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        request: EnqueueRequest,
+    ) -> Result<EnqueueOutcome, WorkError> {
+        let payload_version = validate_enqueue_request(&request)?;
         let inserted = sqlx::query(
             r#"
             INSERT INTO jobs (
@@ -58,7 +66,7 @@ impl WorkStore {
         .bind(&request.dedupe_key)
         .bind(&request.serialization_key)
         .bind(request.max_attempts)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await
         .map_err(|error| map_insert_error(error, "enqueue failed"))?;
 
@@ -103,6 +111,16 @@ impl WorkStore {
                 (state = 'queued' AND run_at <= NOW())
                 OR (state = 'leased' AND lease_deadline < NOW())
             )
+              AND (
+                  serialization_key IS NULL
+                  OR state = 'leased'
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM jobs AS active
+                      WHERE active.serialization_key = jobs.serialization_key
+                        AND active.state = 'leased'
+                  )
+              )
             ORDER BY priority DESC, run_at ASC, created_at ASC
             FOR UPDATE SKIP LOCKED
             LIMIT $1
@@ -115,8 +133,23 @@ impl WorkStore {
 
         let lease_duration = Duration::seconds(options.lease_duration_secs);
         let mut claimed = Vec::with_capacity(candidates.len());
+        let mut claimed_serialization_keys = HashSet::new();
 
         for candidate in candidates {
+            if let Some(serialization_key) = &candidate.serialization_key {
+                if !claimed_serialization_keys.insert(serialization_key.clone()) {
+                    continue;
+                }
+                let acquired: bool =
+                    sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                        .bind(serialization_key)
+                        .fetch_one(&mut *tx)
+                        .await
+                        .map_err(|_| WorkError::dependency("serialization lock failed"))?;
+                if !acquired {
+                    continue;
+                }
+            }
             if candidate.state == JobState::Leased {
                 close_open_attempt(&mut tx, candidate.id, AttemptOutcome::LostLease, None).await?;
             }
@@ -465,7 +498,7 @@ impl WorkStore {
             UPDATE jobs
             SET state = 'queued',
                 run_at = NOW(),
-                attempt_count = 0,
+                max_attempts = GREATEST(max_attempts, attempt_count + 1),
                 lease_token = NULL,
                 lease_owner = NULL,
                 lease_deadline = NULL,
@@ -550,6 +583,29 @@ fn payload_version(payload: &serde_json::Value) -> Result<i32, WorkError> {
         .filter(|value| *value > 0)
         .map(|value| value as i32)
         .ok_or_else(|| WorkError::validation("payload must include positive schema_version"))
+}
+
+fn validate_enqueue_request(request: &EnqueueRequest) -> Result<i32, WorkError> {
+    let payload_version = payload_version(&request.payload)?;
+    if request.max_attempts <= 0 {
+        return Err(WorkError::validation("max_attempts must be positive"));
+    }
+    if request.job_type.trim().is_empty() || request.job_type.chars().count() > 128 {
+        return Err(WorkError::validation("job_type has invalid length"));
+    }
+    if request.dedupe_key.trim().is_empty() || request.dedupe_key.chars().count() > 512 {
+        return Err(WorkError::validation("dedupe_key has invalid length"));
+    }
+    if request
+        .serialization_key
+        .as_ref()
+        .is_some_and(|key| key.trim().is_empty() || key.chars().count() > 512)
+    {
+        return Err(WorkError::validation(
+            "serialization_key has invalid length",
+        ));
+    }
+    Ok(payload_version)
 }
 
 fn map_insert_error(error: sqlx::Error, message: &str) -> WorkError {
