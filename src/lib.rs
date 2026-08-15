@@ -11,8 +11,14 @@ pub mod ingress;
 pub mod outbound;
 pub mod provider;
 pub mod runtime;
+pub mod work;
 
 pub use cli::{Cli, execute};
 pub use config::{Config, ConfigSource, ResolvedConfig};
 pub use error::{AppError, ErrorClass, ExitCode};
 pub use runtime::{Role, RuntimeOptions, run};
+pub use work::{
+    AttemptOutcome, AttemptSummary, ClaimOptions, ClaimedJob, EnqueueOutcome, EnqueueRequest,
+    FailOutcome, JobState, JobSummary, VersionedPayload, WorkError, WorkStore, is_retryable,
+    retry_delay_secs,
+};
