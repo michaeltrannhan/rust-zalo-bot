@@ -1,9 +1,12 @@
 //! Real HTTP adapter for the Zalo Bot API.
 
 use super::error::ZaloProviderError;
-use super::parse::{parse_text_webhook, verify_webhook_secret};
+use super::parse::{parse_image_webhook, parse_text_webhook, verify_webhook_secret};
 use super::send::{send_message, validate_outbound};
-use super::types::{DEFAULT_API_BASE, NormalizedInboundText, SendMessageResult, ZaloHttpConfig};
+use super::types::{
+    DEFAULT_API_BASE, NormalizedInboundImage, NormalizedInboundText, SendMessageResult,
+    ZaloHttpConfig,
+};
 
 pub struct ZaloHttpAdapter {
     config: ZaloHttpConfig,
@@ -40,6 +43,13 @@ impl ZaloHttpAdapter {
         body: &[u8],
     ) -> Result<NormalizedInboundText, ZaloProviderError> {
         parse_text_webhook(&self.config, body)
+    }
+
+    pub fn parse_image_webhook(
+        &self,
+        body: &[u8],
+    ) -> Result<NormalizedInboundImage, ZaloProviderError> {
+        parse_image_webhook(&self.config, body)
     }
 
     pub fn validate_outbound(&self, chat_id: &str, text: &str) -> Result<(), ZaloProviderError> {

@@ -1,0 +1,9 @@
+{
+  "event_name": "message.image.received",
+  "message": {
+    "message_id": "img-missing",
+    "from": { "id": "sender-missing" },
+    "chat": { "id": "chat-missing" },
+    "date": 1752854400
+  }
+}

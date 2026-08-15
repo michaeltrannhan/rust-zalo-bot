@@ -1,0 +1,10 @@
+{
+  "event_name": "message.image.received",
+  "message": {
+    "message_id": "img-legacy-001",
+    "from": { "id": "sender-legacy" },
+    "chat": { "id": "chat-legacy" },
+    "date": 1752854400,
+    "photo_url": "https://s120.zadn.vn/legacy/photo.jpg"
+  }
+}

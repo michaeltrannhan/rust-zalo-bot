@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "result": {
+    "event_name": "message.image.received",
+    "message": {
+      "message_id": "img-envelope-001",
+      "from": { "id": "sender-envelope-img" },
+      "chat": { "id": "chat-envelope-img" },
+      "date": 1750316131602,
+      "photos": [
+        { "url": "https://s120.zdn.vn/envelope/photo.jpg" }
+      ],
+      "caption": "from envelope"
+    }
+  }
+}

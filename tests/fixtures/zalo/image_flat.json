@@ -1,0 +1,15 @@
+{
+  "event_name": "message.image.received",
+  "message": {
+    "message_id": "img-msg-001",
+    "from": {
+      "id": "8891234567890123456"
+    },
+    "chat": {
+      "id": "7009876543210987654"
+    },
+    "date": 1752854400,
+    "photo": "https://s120.zdn.vn/redacted/receipt.jpg",
+    "caption": "lunch receipt"
+  }
+}

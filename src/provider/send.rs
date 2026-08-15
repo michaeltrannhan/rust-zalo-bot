@@ -147,7 +147,7 @@ fn map_transport_error(
             .attach_send_context(token, chat_id, text);
     }
     let cause = err.without_url().to_string();
-    let redacted = redact_value(&cause, token, chat_id, text).into_owned();
+    let redacted = redact_value(&cause, token, chat_id, text, "").into_owned();
     ZaloProviderError::new(
         ErrorClass::ProviderError,
         format!("sendMessage request failed: {redacted}"),

@@ -2,12 +2,18 @@
 
 use std::borrow::Cow;
 
-pub fn redact_value<'a>(value: &'a str, token: &str, chat_id: &str, text: &str) -> Cow<'a, str> {
+pub fn redact_value<'a>(
+    value: &'a str,
+    token: &str,
+    chat_id: &str,
+    text: &str,
+    url: &str,
+) -> Cow<'a, str> {
     if value.is_empty() {
         return Cow::Borrowed(value);
     }
     let mut out = Cow::Borrowed(value);
-    for needle in [token, chat_id, text] {
+    for needle in [token, chat_id, text, url] {
         if needle.is_empty() {
             continue;
         }
@@ -18,6 +24,14 @@ pub fn redact_value<'a>(value: &'a str, token: &str, chat_id: &str, text: &str) 
     }
     if !token.is_empty() {
         for escaped in [url_escape(token), path_escape(token)] {
+            if out.contains(escaped.as_str()) {
+                let owned = out.into_owned().replace(&escaped, "[REDACTED]");
+                out = Cow::Owned(owned);
+            }
+        }
+    }
+    if !url.is_empty() {
+        for escaped in [url_escape(url), path_escape(url)] {
             if out.contains(escaped.as_str()) {
                 let owned = out.into_owned().replace(&escaped, "[REDACTED]");
                 out = Cow::Owned(owned);

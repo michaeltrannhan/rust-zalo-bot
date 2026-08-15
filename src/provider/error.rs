@@ -6,13 +6,19 @@ use crate::error::ErrorClass;
 
 use super::redact::redact_value;
 
+#[derive(Clone, Default)]
+struct RedactionNeedles {
+    token: String,
+    chat_id: String,
+    text: String,
+    url: String,
+}
+
 #[derive(Clone)]
 pub struct ZaloProviderError {
     pub class: ErrorClass,
     message: String,
-    token: String,
-    chat_id: String,
-    text: String,
+    needles: Box<RedactionNeedles>,
 }
 
 impl ZaloProviderError {
@@ -20,9 +26,7 @@ impl ZaloProviderError {
         Self {
             class,
             message: message.into(),
-            token: String::new(),
-            chat_id: String::new(),
-            text: String::new(),
+            needles: Box::default(),
         }
     }
 
@@ -32,18 +36,30 @@ impl ZaloProviderError {
         chat_id: impl Into<String>,
         text: impl Into<String>,
     ) -> Self {
-        self.token = token.into();
-        self.chat_id = chat_id.into();
-        self.text = text.into();
+        self.needles.token = token.into();
+        self.needles.chat_id = chat_id.into();
+        self.needles.text = text.into();
         self
     }
 
     pub fn redacted_message(&self) -> String {
-        redact_value(&self.message, &self.token, &self.chat_id, &self.text).into_owned()
+        redact_value(
+            &self.message,
+            &self.needles.token,
+            &self.needles.chat_id,
+            &self.needles.text,
+            &self.needles.url,
+        )
+        .into_owned()
     }
 
     pub(crate) fn attach_send_context(self, token: &str, chat_id: &str, text: &str) -> Self {
         self.with_redaction_context(token, chat_id, text)
+    }
+
+    pub(crate) fn attach_media_context(mut self, url: &str) -> Self {
+        self.needles.url = url.to_string();
+        self
     }
 }
 
