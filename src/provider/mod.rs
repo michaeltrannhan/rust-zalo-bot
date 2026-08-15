@@ -1,0 +1,1 @@
+//! Narrow external provider adapters.
