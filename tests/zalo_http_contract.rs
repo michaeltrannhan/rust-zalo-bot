@@ -7,7 +7,7 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zl_expense::error::ErrorClass;
-use zl_expense::provider::{InboundEventKind, ZaloHttpAdapter, ZaloHttpConfig, ZaloProviderError};
+use zl_expense::provider::{InboundEventKind, ZaloHttpAdapter, ZaloHttpConfig};
 
 type LoopbackHandler = Arc<dyn Fn(&str, &str, &str) -> (u16, String) + Send + Sync>;
 
@@ -97,10 +97,7 @@ impl LoopbackServer {
     }
 }
 
-async fn handle_connection(
-    mut stream: tokio::net::TcpStream,
-    handler: LoopbackHandler,
-) {
+async fn handle_connection(mut stream: tokio::net::TcpStream, handler: LoopbackHandler) {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -113,17 +110,35 @@ async fn handle_connection(
             break;
         }
     }
-    let request = String::from_utf8_lossy(&buf);
+    let header_end = buf
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+        .unwrap_or(buf.len());
+    let headers = String::from_utf8_lossy(&buf[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    while buf.len() < header_end + content_length {
+        let n = stream.read(&mut chunk).await.unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    let request = String::from_utf8_lossy(&buf[..header_end]);
     let mut lines = request.lines();
     let request_line = lines.next().unwrap_or_default();
     let parts: Vec<&str> = request_line.split_whitespace().collect();
     let method = parts.first().copied().unwrap_or_default();
     let path = parts.get(1).copied().unwrap_or_default();
-    let body = request
-        .split("\r\n\r\n")
-        .nth(1)
-        .unwrap_or_default()
-        .to_string();
+    let body = String::from_utf8_lossy(&buf[header_end..]).to_string();
     let (status, response_body) = handler(method, path, &body);
     let response = format!(
         "HTTP/1.1 {} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -215,6 +230,17 @@ fn malformed_known_event_is_validation() {
 }
 
 #[test]
+fn text_event_without_text_is_validation() {
+    let adapter =
+        ZaloHttpAdapter::new(test_config("http://unused", "tok", "sec")).expect("adapter");
+    let body = br#"{"event_name":"message.text.received","message":{"message_id":"m1","from":{"id":"s1"},"chat":{"id":"c1"},"date":1752854400}}"#;
+    let err = adapter
+        .parse_text_webhook(body)
+        .expect_err("text is required");
+    assert_eq!(err.class, ErrorClass::Validation);
+}
+
+#[test]
 fn verify_webhook_secret_accepts_trimmed_match() {
     let adapter =
         ZaloHttpAdapter::new(test_config("http://unused", "tok", "s3cret-token")).expect("adapter");
@@ -250,6 +276,29 @@ async fn send_message_success_records_request() {
     assert_eq!(req.path, format!("/bot{TOKEN}/sendMessage"));
     assert!(req.body.contains("\"chat_id\":\"c1\""));
     assert!(req.body.contains("\"text\":\"đã ghi nhận\""));
+}
+
+#[tokio::test]
+async fn send_message_accepts_success_without_provider_message_id() {
+    let (server, _) = LoopbackServer::spawn_recording(200, r#"{"ok":true,"result":{}}"#);
+    let adapter = ZaloHttpAdapter::new(test_config(server.url(), "token", "sec")).expect("adapter");
+    let result = adapter.send_message("c1", "x").await.expect("send");
+    assert_eq!(result.provider_message_id, "");
+}
+
+#[tokio::test]
+async fn send_message_encodes_token_as_one_path_segment() {
+    let (server, recorded) = LoopbackServer::spawn_recording(200, r#"{"ok":true,"result":{}}"#);
+    let adapter =
+        ZaloHttpAdapter::new(test_config(server.url(), "tok/part?query", "sec")).expect("adapter");
+    adapter.send_message("c1", "x").await.expect("send");
+    let path = recorded
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("request")
+        .path;
+    assert_eq!(path, "/bottok%2Fpart%3Fquery/sendMessage");
 }
 
 #[tokio::test]
@@ -291,6 +340,18 @@ async fn send_message_5xx_is_provider_error() {
     let adapter = ZaloHttpAdapter::new(test_config(server.url(), TOKEN, "sec")).expect("adapter");
     let err = adapter.send_message("c1", "x").await.expect_err("500");
     assert_eq!(err.class, ErrorClass::ProviderError);
+}
+
+#[tokio::test]
+async fn provider_error_never_includes_response_body() {
+    let (server, _) = LoopbackServer::spawn_recording(
+        500,
+        r#"{"description":"unrelated-private-provider-payload"}"#,
+    );
+    let adapter = ZaloHttpAdapter::new(test_config(server.url(), "token", "sec")).expect("adapter");
+    let err = adapter.send_message("c1", "x").await.expect_err("500");
+    let rendered = format!("{err} {err:?}");
+    assert!(!rendered.contains("unrelated-private-provider-payload"));
 }
 
 #[tokio::test]
@@ -342,23 +403,25 @@ fn send_validation_rejects_empty_and_long_text() {
 }
 
 #[test]
-fn errors_redact_sensitive_values() {
+fn debug_output_redacts_config_and_normalized_event() {
     const TOKEN: &str = "secret:bot-token";
+    const SECRET: &str = "webhook-secret-value";
     const CHAT: &str = "chat-sensitive-42";
     const TEXT: &str = "sensitive message body";
-    let err = ZaloProviderError::new(
-        ErrorClass::ProviderError,
-        format!("send failed token={TOKEN} chat={CHAT} text={TEXT} body={{\"token\":\"{TOKEN}\"}}"),
-    )
-    .with_redaction_context(TOKEN, CHAT, TEXT);
-    let display = err.to_string();
-    let debug = format!("{err:?}");
-    assert!(!display.contains(TOKEN));
-    assert!(!display.contains(CHAT));
-    assert!(!display.contains(TEXT));
-    assert!(!debug.contains(TOKEN));
-    assert!(!debug.contains(CHAT));
-    assert!(!debug.contains(TEXT));
+    let config = test_config("http://unused", TOKEN, SECRET);
+    let config_debug = format!("{config:?}");
+    assert!(!config_debug.contains(TOKEN));
+    assert!(!config_debug.contains(SECRET));
+
+    let adapter = ZaloHttpAdapter::new(config).expect("adapter");
+    let body = format!(
+        r#"{{"event_name":"message.text.received","message":{{"message_id":"event-private","from":{{"id":"sender-private"}},"chat":{{"id":"{CHAT}"}},"date":1752854400,"text":"{TEXT}"}}}}"#
+    );
+    let event = adapter.parse_text_webhook(body.as_bytes()).expect("event");
+    let event_debug = format!("{event:?}");
+    for secret in ["event-private", "sender-private", CHAT, TEXT] {
+        assert!(!event_debug.contains(secret));
+    }
 }
 
 #[tokio::test]

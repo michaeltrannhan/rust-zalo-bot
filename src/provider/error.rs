@@ -16,7 +16,7 @@ pub struct ZaloProviderError {
 }
 
 impl ZaloProviderError {
-    pub fn new(class: ErrorClass, message: impl Into<String>) -> Self {
+    pub(crate) fn new(class: ErrorClass, message: impl Into<String>) -> Self {
         Self {
             class,
             message: message.into(),
@@ -26,7 +26,7 @@ impl ZaloProviderError {
         }
     }
 
-    pub fn with_redaction_context(
+    pub(crate) fn with_redaction_context(
         mut self,
         token: impl Into<String>,
         chat_id: impl Into<String>,
@@ -42,7 +42,7 @@ impl ZaloProviderError {
         redact_value(&self.message, &self.token, &self.chat_id, &self.text).into_owned()
     }
 
-    pub fn attach_send_context(self, token: &str, chat_id: &str, text: &str) -> Self {
+    pub(crate) fn attach_send_context(self, token: &str, chat_id: &str, text: &str) -> Self {
         self.with_redaction_context(token, chat_id, text)
     }
 }

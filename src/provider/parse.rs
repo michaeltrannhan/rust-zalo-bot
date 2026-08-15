@@ -82,8 +82,13 @@ pub fn parse_text_webhook(
         return Err(validation("message missing chat.id"));
     }
 
+    let text = wire.text.unwrap_or_default();
+    if kind == InboundEventKind::TextReceived && text.trim().is_empty() {
+        return Err(validation("text message missing text"));
+    }
+
     let received_at = if wire.date != 0 {
-        provider_time(wire.date)
+        provider_time(wire.date).ok_or_else(|| validation("message date is out of range"))?
     } else {
         Utc::now()
     };
@@ -93,7 +98,7 @@ pub fn parse_text_webhook(
         event_id,
         sender_id,
         chat_id,
-        text: wire.text.unwrap_or_default(),
+        text,
         received_at,
         kind,
     })
@@ -125,16 +130,12 @@ fn validation(message: impl Into<String>) -> ZaloProviderError {
     ZaloProviderError::new(ErrorClass::Validation, message)
 }
 
-fn provider_time(value: i64) -> DateTime<Utc> {
+fn provider_time(value: i64) -> Option<DateTime<Utc>> {
     const MILLISECOND_THRESHOLD: i64 = 100_000_000_000;
     if value >= MILLISECOND_THRESHOLD || value <= -MILLISECOND_THRESHOLD {
-        Utc.timestamp_millis_opt(value)
-            .single()
-            .unwrap_or_else(Utc::now)
+        Utc.timestamp_millis_opt(value).single()
     } else {
-        Utc.timestamp_opt(value, 0)
-            .single()
-            .unwrap_or_else(Utc::now)
+        Utc.timestamp_opt(value, 0).single()
     }
 }
 

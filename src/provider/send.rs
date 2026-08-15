@@ -46,18 +46,15 @@ pub async fn send_message(
         ));
     }
 
-    let url = format!(
-        "{}/bot{}/sendMessage",
-        config.normalized_api_base(),
-        config.bot_token
-    );
+    let url = send_url(config)
+        .map_err(|error| error.attach_send_context(&config.bot_token, chat_id, text))?;
     let payload = serde_json::json!({
         "chat_id": chat_id,
         "text": text,
     });
 
     let response = client
-        .post(&url)
+        .post(url)
         .json(&payload)
         .send()
         .await
@@ -72,7 +69,6 @@ pub async fn send_message(
     if !status.is_success() {
         return Err(classify_http_status(
             status,
-            &body,
             &config.bot_token,
             chat_id,
             text,
@@ -100,7 +96,9 @@ fn parse_success_body(
 
     let provider_message_id = parsed
         .result
-        .and_then(|result| id_from_value(&result.message_id))
+        .and_then(|result| result.message_id)
+        .as_ref()
+        .and_then(id_from_value)
         .unwrap_or_default();
 
     Ok(SendMessageResult {
@@ -110,13 +108,11 @@ fn parse_success_body(
 
 fn classify_http_status(
     status: StatusCode,
-    body: &[u8],
     token: &str,
     chat_id: &str,
     text: &str,
 ) -> ZaloProviderError {
-    let snippet = redact_body_snippet(body, token, chat_id, text);
-    let message = format!("zalo api status {}: {}", status.as_u16(), snippet);
+    let message = format!("zalo api returned HTTP {}", status.as_u16());
     let class = match status.as_u16() {
         429 => ErrorClass::RateLimited,
         500..=599 => ErrorClass::ProviderError,
@@ -124,6 +120,20 @@ fn classify_http_status(
         _ => ErrorClass::ProviderError,
     };
     ZaloProviderError::new(class, message).attach_send_context(token, chat_id, text)
+}
+
+fn send_url(config: &ZaloHttpConfig) -> Result<reqwest::Url, ZaloProviderError> {
+    let mut url = reqwest::Url::parse(&config.normalized_api_base())
+        .map_err(|_| ZaloProviderError::new(ErrorClass::Validation, "zalo api base is invalid"))?;
+    {
+        let mut segments = url.path_segments_mut().map_err(|_| {
+            ZaloProviderError::new(ErrorClass::Validation, "zalo api base cannot be a base URL")
+        })?;
+        segments.pop_if_empty();
+        segments.push(&format!("bot{}", config.bot_token));
+        segments.push("sendMessage");
+    }
+    Ok(url)
 }
 
 fn map_transport_error(
@@ -149,17 +159,6 @@ fn ambiguous(message: impl Into<String>) -> ZaloProviderError {
     ZaloProviderError::new(ErrorClass::ProviderAmbiguous, message)
 }
 
-fn redact_body_snippet(body: &[u8], token: &str, chat_id: &str, text: &str) -> String {
-    let raw = String::from_utf8_lossy(body);
-    let trimmed = raw.trim();
-    let snippet = if trimmed.len() > 200 {
-        trimmed[..200].to_string()
-    } else {
-        trimmed.to_string()
-    };
-    redact_value(&snippet, token, chat_id, text).into_owned()
-}
-
 fn id_from_value(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(s) => Some(s.clone()),
@@ -176,5 +175,5 @@ struct SendResponse {
 
 #[derive(Debug, Deserialize)]
 struct SendResultBody {
-    message_id: serde_json::Value,
+    message_id: Option<serde_json::Value>,
 }
