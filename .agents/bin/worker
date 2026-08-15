@@ -1,0 +1,387 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: .agents/bin/worker [options] <role> <task>
+
+Roles: investigate, implement, debug, test, trivial
+
+Options:
+  --model <id>       Override the role's default Cursor model.
+  --read-only        Enforce Cursor plan mode (automatic for investigate).
+  --isolated <name>  Create agent/<name> in .agents/worktrees/<name>.
+  --base <ref>        Base an isolated worktree on this ref (default: HEAD).
+  --dry-run           Validate and print routing without invoking Cursor.
+  -h, --help          Show this help.
+
+Environment:
+  CURSOR_AGENT_BIN    Cursor CLI executable (default: agent, then cursor-agent).
+EOF
+}
+
+fail_json() {
+  local summary=$1
+  local code=${2:-1}
+  jq -n \
+    --arg summary "$summary" \
+    --arg role "${role:-unknown}" \
+    --arg model "${model:-unknown}" \
+    '{status:"failed", summary:$summary, files_changed:[], checks_run:[], checks_passed:false, assumptions:[], unresolved_risks:[], needs_orchestrator_attention:[$summary], commit:null, role:$role, model:$model}'
+  exit "$code"
+}
+
+resolve_agent() {
+  if [[ -n "${CURSOR_AGENT_BIN:-}" ]]; then
+    command -v "$CURSOR_AGENT_BIN" 2>/dev/null || return 1
+  elif command -v agent >/dev/null 2>&1; then
+    command -v agent
+  elif command -v cursor-agent >/dev/null 2>&1; then
+    command -v cursor-agent
+  else
+    return 1
+  fi
+}
+
+default_model() {
+  case "$1" in
+    investigate|debug) printf '%s\n' 'cursor-grok-4.6-high-fast' ;;
+    implement|test) printf '%s\n' 'composer-2.5' ;;
+    trivial) printf '%s\n' 'auto' ;;
+    *) return 1 ;;
+  esac
+}
+
+safe_name() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+extract_handoff() {
+  local cli_json=$1
+  local result candidate
+  result=$(jq -r '.result // empty' "$cli_json") || return 1
+
+  if printf '%s\n' "$result" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    printf '%s\n' "$result"
+    return 0
+  fi
+
+  candidate=$(printf '%s\n' "$result" | awk '
+    !inside && index($0, "```json") {
+      inside=1
+      sub(/^.*```json[[:space:]]*/, "")
+      if (length($0)) print
+      next
+    }
+    inside && index($0, "```") {
+      sub(/```.*$/, "")
+      if (length($0)) print
+      exit
+    }
+    inside { print }
+  ')
+  if printf '%s\n' "$candidate" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  candidate=$(printf '%s\n' "$result" | awk '
+    BEGIN { started=0; depth=0; quoted=0; escaped=0; value="" }
+    {
+      if (NR > 1 && started) value=value "\n"
+      for (i=1; i<=length($0); i++) {
+        char=substr($0, i, 1)
+        if (!started) {
+          if (char != "{") continue
+          started=1
+          depth=1
+          value="{"
+          continue
+        }
+        value=value char
+        if (quoted) {
+          if (escaped) escaped=0
+          else if (char == "\\") escaped=1
+          else if (char == "\"") quoted=0
+          continue
+        }
+        if (char == "\"") quoted=1
+        else if (char == "{") depth++
+        else if (char == "}") {
+          depth--
+          if (depth == 0) {
+            print value
+            exit
+          }
+        }
+      }
+    }
+  ')
+  if printf '%s\n' "$candidate" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  return 1
+}
+
+normalize_handoff() {
+  local input_json=$1
+  local output_json=$2
+  local workspace=$3
+  local branch=$4
+  local base_commit=$5
+
+  jq \
+    --arg role "$role" \
+    --arg model "$model" \
+    --arg workspace "$workspace" \
+    --arg branch "$branch" \
+    --arg base_commit "$base_commit" \
+    '
+      def array_or_empty: if type == "array" then . else [] end;
+      def attention:
+        if type == "array" then .
+        elif . == false or . == null then []
+        else [tostring]
+        end;
+      (.status // "missing") as $claimed_status |
+      (.checks_passed // .tests_passed // null) as $checks_passed |
+      {
+        status: (
+          if (($claimed_status | IN("completed", "blocked", "failed")) | not) then "failed"
+          elif $claimed_status == "completed" and $checks_passed == false then "failed"
+          else $claimed_status
+          end
+        ),
+        summary: (.summary // "Cursor worker returned no summary."),
+        files_changed: ((.files_changed // []) | array_or_empty),
+        checks_run: ((.checks_run // .tests_run // []) | array_or_empty),
+        checks_passed: $checks_passed,
+        assumptions: ((.assumptions // []) | array_or_empty),
+        unresolved_risks: ((.unresolved_risks // .risks // []) | array_or_empty),
+        needs_orchestrator_attention: (
+          ((.needs_orchestrator_attention // []) | attention)
+          + (if ($claimed_status | IN("completed", "blocked", "failed")) then [] else ["Worker returned a missing or invalid status."] end)
+          + (if $claimed_status == "completed" and $checks_passed == false then ["Worker claimed completion while checks failed."] else [] end)
+        ),
+        commit: (.commit // null),
+        role: $role,
+        model: $model,
+        workspace: $workspace,
+        branch: (if $branch == "" then null else $branch end),
+        base_commit: (if $base_commit == "" then null else $base_commit end)
+      }
+    ' "$input_json" > "$output_json"
+}
+
+model_override=''
+read_only=false
+isolated_name=''
+base_ref='HEAD'
+dry_run=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --model)
+      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+      model_override=$2
+      shift 2
+      ;;
+    --read-only)
+      read_only=true
+      shift
+      ;;
+    --isolated)
+      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+      isolated_name=$2
+      shift 2
+      ;;
+    --base)
+      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+      base_ref=$2
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      printf 'Unknown option: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+[[ $# -eq 2 ]] || { usage >&2; exit 2; }
+role=$1
+task=$2
+
+model=$(default_model "$role") || fail_json "Unknown worker role: $role" 2
+[[ -n "$model_override" ]] && model=$model_override
+[[ -n "$task" ]] || fail_json 'Task must not be empty.' 2
+command -v jq >/dev/null 2>&1 || { printf 'worker requires jq on PATH.\n' >&2; exit 127; }
+
+if [[ "$role" == 'investigate' ]]; then
+  read_only=true
+fi
+if [[ "$read_only" == true && -n "$isolated_name" ]]; then
+  fail_json '--read-only and --isolated cannot be combined.' 2
+fi
+if [[ -n "$isolated_name" ]] && ! safe_name "$isolated_name"; then
+  fail_json 'Isolation name must start with an alphanumeric character and contain only letters, digits, dot, underscore, or hyphen.' 2
+fi
+if [[ -n "$isolated_name" ]] && ! git check-ref-format --branch "agent/$isolated_name" >/dev/null 2>&1; then
+  fail_json "Isolation name does not form a valid Git branch: agent/$isolated_name" 2
+fi
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+agents_dir=$(cd "$script_dir/.." && pwd -P)
+repo_root=$(git -C "$agents_dir" rev-parse --show-toplevel 2>/dev/null) || fail_json 'Run the worker from inside a git repository.' 2
+contract_prompt="$agents_dir/prompts/_contract.md"
+role_prompt="$agents_dir/prompts/$role.md"
+[[ -r "$contract_prompt" && -r "$role_prompt" ]] || fail_json "Missing prompt file for role: $role" 2
+
+agent_bin=$(resolve_agent) || fail_json 'Cursor CLI not found. Install agent/cursor-agent or set CURSOR_AGENT_BIN.' 127
+
+if [[ "$dry_run" == false ]]; then
+  models_output=$("$agent_bin" models 2>&1) || fail_json 'Cursor CLI could not list account models. Check agent status and network access.' 1
+  if ! printf '%s\n' "$models_output" | awk '{print $1}' | grep -Fqx "$model"; then
+    fail_json "Cursor model is unavailable for this account: $model" 2
+  fi
+fi
+
+workspace=$repo_root
+branch=''
+base_commit=''
+created_worktree=false
+
+if [[ -n "$isolated_name" ]]; then
+  branch="agent/$isolated_name"
+  workspace="$agents_dir/worktrees/$isolated_name"
+
+  if [[ "$dry_run" == false ]]; then
+    git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1 || fail_json 'Isolated workers require at least one repository commit; create the initial project commit first.' 2
+    git -C "$repo_root" rev-parse --verify "${base_ref}^{commit}" >/dev/null 2>&1 || fail_json "Invalid worktree base ref: $base_ref" 2
+    base_commit=$(git -C "$repo_root" rev-parse "${base_ref}^{commit}")
+    [[ ! -e "$workspace" ]] || fail_json "Worker worktree path already exists: $workspace" 2
+    if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
+      fail_json "Worker branch already exists: $branch" 2
+    fi
+    mkdir -p "$agents_dir/worktrees"
+    if ! git -C "$repo_root" worktree add -b "$branch" "$workspace" "$base_commit" >&2; then
+      fail_json "Failed to create isolated worktree: $workspace" 1
+    fi
+    created_worktree=true
+  else
+    base_commit=$(git -C "$repo_root" rev-parse --verify "${base_ref}^{commit}" 2>/dev/null || true)
+  fi
+else
+  branch=$(git -C "$repo_root" symbolic-ref --short -q HEAD 2>/dev/null || true)
+  base_commit=$(git -C "$repo_root" rev-parse --verify HEAD 2>/dev/null || true)
+fi
+
+if [[ "$dry_run" == true ]]; then
+  jq -n \
+    --arg role "$role" \
+    --arg model "$model" \
+    --arg workspace "$workspace" \
+    --arg branch "$branch" \
+    --arg base "$base_ref" \
+    --argjson read_only "$read_only" \
+    --argjson isolated "$([[ -n "$isolated_name" ]] && printf true || printf false)" \
+    '{status:"completed", summary:"Dry run; Cursor was not invoked and no worktree was created.", role:$role, model:$model, workspace:$workspace, branch:(if $branch == "" then null else $branch end), base:$base, read_only:$read_only, isolated:$isolated, files_changed:[], checks_run:[], checks_passed:null, assumptions:[], unresolved_risks:[], needs_orchestrator_attention:[], commit:null}'
+  exit 0
+fi
+
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/cursor-worker.XXXXXX") || fail_json 'Could not create temporary worker directory.' 1
+cleanup() {
+  rm -f "$tmp_dir/prompt.txt" "$tmp_dir/cursor.json" "$tmp_dir/handoff.json" "$tmp_dir/normalized.json" "$tmp_dir/files.json" "$tmp_dir/final.json"
+  rmdir "$tmp_dir" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+{
+  printf '%s\n\n' "$(<"$contract_prompt")"
+  printf '%s\n\n' "$(<"$role_prompt")"
+  printf '# Worker context\n\n'
+  printf -- '- role: %s\n' "$role"
+  printf -- '- model: %s\n' "$model"
+  printf -- '- workspace: %s\n' "$workspace"
+  printf -- '- branch: %s\n' "${branch:-detached-or-unborn}"
+  printf -- '- base_commit: %s\n' "${base_commit:-none}"
+  printf -- '- isolated: %s\n' "$created_worktree"
+  printf -- '- read_only: %s\n\n' "$read_only"
+  printf '# Assigned task\n\n%s\n' "$task"
+} > "$tmp_dir/prompt.txt"
+
+cursor_args=(-p --model "$model" --output-format json --trust --workspace "$workspace")
+if [[ "$read_only" == true ]]; then
+  cursor_args+=(--mode plan)
+else
+  cursor_args+=(--force)
+fi
+
+if ! "$agent_bin" "${cursor_args[@]}" "$(<"$tmp_dir/prompt.txt")" > "$tmp_dir/cursor.json"; then
+  fail_json 'Cursor CLI worker failed. Review its stderr, authentication, model access, and workspace trust.' 1
+fi
+if ! jq -e '.type == "result" and .subtype == "success" and (.is_error == false)' "$tmp_dir/cursor.json" >/dev/null 2>&1; then
+  fail_json 'Cursor CLI returned an unsuccessful or malformed JSON result.' 1
+fi
+if ! extract_handoff "$tmp_dir/cursor.json" > "$tmp_dir/handoff.json"; then
+  result_excerpt=$(jq -r '.result // "No worker result."' "$tmp_dir/cursor.json" | head -c 1000)
+  jq -n \
+    --arg summary 'Cursor completed but did not return the required JSON handoff.' \
+    --arg excerpt "$result_excerpt" \
+    --arg role "$role" \
+    --arg model "$model" \
+    --arg workspace "$workspace" \
+    '{status:"failed", summary:$summary, files_changed:[], checks_run:[], checks_passed:false, assumptions:[], unresolved_risks:[], needs_orchestrator_attention:[$excerpt], commit:null, role:$role, model:$model, workspace:$workspace}'
+  exit 1
+fi
+
+normalize_handoff "$tmp_dir/handoff.json" "$tmp_dir/normalized.json" "$workspace" "$branch" "$base_commit"
+
+if [[ "$created_worktree" == true ]]; then
+  if [[ -n "$(git -C "$workspace" status --porcelain)" ]]; then
+    jq '.status = "failed" | .checks_passed = false | .unresolved_risks += ["The isolated worktree contains uncommitted changes."] | .needs_orchestrator_attention += ["Inspect and commit or repair the worker worktree before integration."] | .commit = null' "$tmp_dir/normalized.json"
+    exit 1
+  fi
+  worker_head=$(git -C "$workspace" rev-parse HEAD)
+  worker_branch=$(git -C "$workspace" symbolic-ref --short -q HEAD 2>/dev/null || true)
+  if [[ "$worker_branch" != "$branch" ]]; then
+    jq --arg expected "$branch" --arg actual "${worker_branch:-detached HEAD}" '.status = "failed" | .checks_passed = false | .unresolved_risks += ["The isolated worker left its assigned branch."] | .needs_orchestrator_attention += ["Expected branch " + $expected + "; found " + $actual + "."] | .commit = null' "$tmp_dir/normalized.json"
+    exit 1
+  fi
+  if ! git -C "$workspace" merge-base --is-ancestor "$base_commit" "$worker_head"; then
+    jq '.status = "failed" | .checks_passed = false | .unresolved_risks += ["The isolated worker history no longer descends from the reviewed base commit."] | .needs_orchestrator_attention += ["Inspect the worker branch history before any integration."] | .commit = null' "$tmp_dir/normalized.json"
+    exit 1
+  fi
+  if [[ "$worker_head" == "$base_commit" ]]; then
+    jq '.status = "failed" | .checks_passed = false | .unresolved_risks += ["The isolated worker created no commit."] | .needs_orchestrator_attention += ["Inspect the worker handoff and worktree; no commit is available to review."] | .commit = null' "$tmp_dir/normalized.json"
+    exit 1
+  fi
+  git -C "$workspace" diff --name-only "$base_commit..$worker_head" | jq -Rsc 'split("\n") | map(select(length > 0))' > "$tmp_dir/files.json"
+  jq \
+    --arg commit "$worker_head" \
+    --slurpfile files "$tmp_dir/files.json" \
+    '.commit = $commit | .files_changed = $files[0]' "$tmp_dir/normalized.json" > "$tmp_dir/final.json"
+  cat "$tmp_dir/final.json"
+  [[ "$(jq -r '.status' "$tmp_dir/final.json")" == 'completed' ]]
+else
+  cat "$tmp_dir/normalized.json"
+  [[ "$(jq -r '.status' "$tmp_dir/normalized.json")" == 'completed' ]]
+fi

@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: .agents/bin/worker-parallel [--max <count>] <jobs.jsonl>
+
+Each nonblank, non-comment line is one JSON object:
+  {"name":"auth-tests","role":"test","task":"Add focused tests"}
+
+Optional fields:
+  model       Override the role default.
+  read_only   Run any role in read-only plan mode (default: false).
+  base        Git ref for an isolated writer (default: HEAD).
+
+Read-only jobs share the current repository. Write jobs automatically receive
+agent/<name> branches and .agents/worktrees/<name> worktrees.
+EOF
+}
+
+max_parallel=3
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --max)
+      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+      max_parallel=$2
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      printf 'Unknown option: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *) break ;;
+  esac
+done
+
+[[ $# -eq 1 ]] || { usage >&2; exit 2; }
+[[ "$max_parallel" =~ ^[1-9][0-9]*$ ]] || { printf -- '--max must be a positive integer.\n' >&2; exit 2; }
+command -v jq >/dev/null 2>&1 || { printf 'worker-parallel requires jq on PATH.\n' >&2; exit 127; }
+
+jobs_file=$1
+[[ -r "$jobs_file" ]] || { printf 'Jobs file is not readable: %s\n' "$jobs_file" >&2; exit 2; }
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+worker="$script_dir/worker"
+agents_dir=$(cd "$script_dir/.." && pwd -P)
+timestamp=$(date -u '+%Y%m%dT%H%M%SZ')
+run_dir="$agents_dir/runs/${timestamp}-$$"
+mkdir -p "$agents_dir/runs"
+mkdir -m 700 "$run_dir"
+normalized_jobs="$run_dir/jobs.jsonl"
+names_file="$run_dir/names.txt"
+: > "$normalized_jobs"
+: > "$names_file"
+
+line_number=0
+job_count=0
+while IFS= read -r line || [[ -n "$line" ]]; do
+  line_number=$((line_number + 1))
+  [[ -z "${line//[[:space:]]/}" ]] && continue
+  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  if ! printf '%s\n' "$line" | jq -e '
+    type == "object" and
+    (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and
+    (.role | IN("investigate", "implement", "debug", "test", "trivial")) and
+    (.task | type == "string" and length > 0) and
+    ((.model // "") | type == "string") and
+    ((.read_only // false) | type == "boolean") and
+    ((.base // "HEAD") | type == "string" and length > 0)
+  ' >/dev/null 2>&1; then
+    printf 'Invalid job at %s:%d\n' "$jobs_file" "$line_number" >&2
+    exit 2
+  fi
+  name=$(printf '%s\n' "$line" | jq -r '.name')
+  if grep -Fqx "$name" "$names_file"; then
+    printf 'Duplicate job name: %s\n' "$name" >&2
+    exit 2
+  fi
+  printf '%s\n' "$name" >> "$names_file"
+  printf '%s\n' "$line" >> "$normalized_jobs"
+  job_count=$((job_count + 1))
+done < "$jobs_file"
+
+[[ "$job_count" -gt 0 ]] || { printf 'Jobs file contains no jobs.\n' >&2; exit 2; }
+
+pids=()
+failures=0
+
+wait_oldest() {
+  local pid=${pids[0]}
+  if ! wait "$pid"; then
+    failures=1
+  fi
+  pids=("${pids[@]:1}")
+}
+
+while IFS= read -r job; do
+  while [[ ${#pids[@]} -ge "$max_parallel" ]]; do
+    wait_oldest
+  done
+
+  name=$(printf '%s\n' "$job" | jq -r '.name')
+  role=$(printf '%s\n' "$job" | jq -r '.role')
+  task=$(printf '%s\n' "$job" | jq -r '.task')
+  model=$(printf '%s\n' "$job" | jq -r '.model // empty')
+  read_only=$(printf '%s\n' "$job" | jq -r '.read_only // false')
+  base=$(printf '%s\n' "$job" | jq -r '.base // "HEAD"')
+
+  args=()
+  [[ -n "$model" ]] && args+=(--model "$model")
+  if [[ "$role" == 'investigate' || "$read_only" == true ]]; then
+    args+=(--read-only)
+  else
+    args+=(--isolated "$name" --base "$base")
+  fi
+  args+=("$role" "$task")
+
+  ("$worker" "${args[@]}" > "$run_dir/$name.json" 2> "$run_dir/$name.stderr.log") &
+  pids+=("$!")
+done < "$normalized_jobs"
+
+while [[ ${#pids[@]} -gt 0 ]]; do
+  wait_oldest
+done
+
+result_files=()
+while IFS= read -r name; do
+  raw_result="$run_dir/$name.json"
+  named_result="$run_dir/$name.result.json"
+  if jq -s -e 'length == 1 and (.[0] | type == "object")' "$raw_result" >/dev/null 2>&1; then
+    jq --arg job_name "$name" '. + {job_name:$job_name}' "$raw_result" > "$named_result"
+  else
+    failures=1
+    jq -n \
+      --arg job_name "$name" \
+      '{status:"failed", summary:"Worker produced empty or malformed structured output.", files_changed:[], checks_run:[], checks_passed:false, assumptions:[], unresolved_risks:[], needs_orchestrator_attention:["Inspect the job stderr log."], commit:null, job_name:$job_name}' > "$named_result"
+  fi
+  result_files+=("$named_result")
+done < "$names_file"
+
+if ! jq -s \
+  --arg run_dir "$run_dir" \
+  '{status:(if all(.[]; .status == "completed") then "completed" else "failed" end), run_dir:$run_dir, results:.}' \
+  "${result_files[@]}" > "$run_dir/summary.json"; then
+  printf 'One or more workers produced invalid output. Inspect %s\n' "$run_dir" >&2
+  exit 1
+fi
+
+cat "$run_dir/summary.json"
+summary_status=$(jq -r '.status' "$run_dir/summary.json")
+[[ "$failures" -eq 0 && "$summary_status" == 'completed' ]]
