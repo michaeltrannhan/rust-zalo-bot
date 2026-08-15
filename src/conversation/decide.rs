@@ -56,7 +56,7 @@ fn handle_active(ctx: &AccountContext, text: &str, now: DateTime<Utc>) -> Conver
         && !(text.trim_start().starts_with('/') && is_explicit_slash_command(intent.kind))
     {
         if is_pending_stale(pending, now) {
-            return expired_outcome();
+            return expired_outcome(true);
         }
         return resolve_pending(ctx, pending, &intent, now);
     }
@@ -67,7 +67,7 @@ fn handle_active(ctx: &AccountContext, text: &str, now: DateTime<Utc>) -> Conver
         IntentKind::Today => render_today(ctx),
         IntentKind::Recent => reply_only(recent_text(&ctx.recent_lines)),
         IntentKind::ManualEntry => create_manual(ctx, &intent, now),
-        IntentKind::Confirm | IntentKind::Discard => expired_outcome(),
+        IntentKind::Confirm | IntentKind::Discard => expired_outcome(false),
         IntentKind::None => reply_only(unknown_text()),
     }
 }
@@ -79,7 +79,7 @@ fn resolve_pending(
     now: DateTime<Utc>,
 ) -> ConversationOutcome {
     if pending.optimistic_version != pending.draft.version {
-        return expired_outcome();
+        return expired_outcome(true);
     }
 
     match intent.kind {
@@ -183,10 +183,14 @@ fn reply_only(body: String) -> ConversationOutcome {
     }
 }
 
-fn expired_outcome() -> ConversationOutcome {
+fn expired_outcome(clear_pending: bool) -> ConversationOutcome {
     ConversationOutcome {
         replies: vec![ReplyPlan::single(pending_expired_text())],
-        commands: vec![DomainCommand::ClearPending],
+        commands: if clear_pending {
+            vec![DomainCommand::ClearPending]
+        } else {
+            vec![]
+        },
     }
 }
 

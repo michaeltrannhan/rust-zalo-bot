@@ -138,6 +138,7 @@ pub struct DecisionContext {
     pub consent_version: Option<String>,
     pub pending_action: Option<PendingAction>,
     pub confirmed_today_total_minor: i64,
+    pub confirmed_today_count: u32,
     pub today_currency: String,
     pub recent_expenses: Vec<RecentExpense>,
     pub sender_allowed: bool,

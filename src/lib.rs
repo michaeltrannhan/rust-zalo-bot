@@ -8,6 +8,7 @@ pub mod error;
 pub mod health;
 pub mod http;
 pub mod ingress;
+pub mod outbound;
 pub mod provider;
 pub mod runtime;
 

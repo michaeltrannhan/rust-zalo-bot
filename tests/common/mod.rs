@@ -47,6 +47,13 @@ impl TestConfig {
         fs::create_dir_all(&credentials_dir).expect("credentials dir");
 
         fs::write(credentials_dir.join("database"), database_url).expect("write db cred");
+        fs::write(credentials_dir.join("zalo-bot"), "test-zalo-bot-token")
+            .expect("write zalo token");
+        fs::write(
+            credentials_dir.join("webhook-secret"),
+            "test-webhook-secret-value",
+        )
+        .expect("write webhook secret");
 
         let config_path = dir.path().join("config.toml");
         let contents = format!(

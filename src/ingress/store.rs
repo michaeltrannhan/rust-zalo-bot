@@ -125,6 +125,7 @@ impl IngressStore {
                 consent_version: None,
                 pending_action: None,
                 confirmed_today_total_minor: 0,
+                confirmed_today_count: 0,
                 today_currency: "VND".to_string(),
                 recent_expenses: Vec::new(),
                 sender_allowed: false,
@@ -320,9 +321,11 @@ async fn load_decision_context(
             .map_err(|_| IngressEffectError::InvalidTransition)?;
     let (timezone, retention_days) = account_preferences;
 
-    let today_total: Option<(i64, String)> = sqlx::query_as(
+    let today_total: Option<(i64, i64, String)> = sqlx::query_as(
         r#"
-        SELECT COALESCE(SUM(amount_minor), 0)::BIGINT, COALESCE(MIN(currency), 'VND')
+        SELECT COALESCE(SUM(amount_minor), 0)::BIGINT,
+               COUNT(*)::BIGINT,
+               COALESCE(MIN(currency), 'VND')
         FROM expenses
         WHERE account_id = $1
           AND state = 'confirmed'
@@ -335,8 +338,8 @@ async fn load_decision_context(
     .await
     .map_err(|_| IngressEffectError::InvalidTransition)?;
 
-    let (confirmed_today_total_minor, today_currency) =
-        today_total.unwrap_or((0, "VND".to_string()));
+    let (confirmed_today_total_minor, confirmed_today_count, today_currency) =
+        today_total.unwrap_or((0, 0, "VND".to_string()));
 
     type RecentExpenseRow = (
         Uuid,
@@ -414,6 +417,7 @@ async fn load_decision_context(
         consent_version,
         pending_action,
         confirmed_today_total_minor,
+        confirmed_today_count: confirmed_today_count as u32,
         today_currency,
         recent_expenses,
         sender_allowed: true,

@@ -322,6 +322,17 @@ fn pending_ok_confirms_and_no_rejects() {
 }
 
 #[test]
+fn confirmation_without_pending_replies_without_invalid_clear_effect() {
+    let ctx = active_ctx(Uuid::new_v4());
+    let outcome = decide(&ctx, "ok", Utc::now());
+    assert_eq!(
+        first_reply(&outcome),
+        "Yêu cầu trước đó đã hết hạn. Bạn gửi lại ảnh hoặc nhập lại nhé."
+    );
+    assert!(outcome.commands.is_empty());
+}
+
+#[test]
 fn expired_pending_returns_exact_expiry_reply_and_clears_state() {
     let expense_id = Uuid::new_v4();
     let armed_at = Utc.with_ymd_and_hms(2026, 8, 15, 9, 0, 0).unwrap();
