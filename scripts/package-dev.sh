@@ -104,7 +104,7 @@ Portable zl-expense bundle (unsigned development build).
 2. Copy share/migrations to /usr/share/zl-expense/migrations.
 3. Copy share/config.example.toml to /etc/zl-expense/config.toml if missing.
 4. Install systemd/zl-expense.service under /lib/systemd/system/ and follow
-   docs/operator-install.md for user, directories, and service enablement.
+   doc/operator-install.md for user, directories, and service enablement.
 EOF
 
 TAR_FILE="${OUTPUT_DIR}/${PACKAGE_NAME}-${PACKAGE_VERSION}-${DEB_ARCH}.tar.gz"

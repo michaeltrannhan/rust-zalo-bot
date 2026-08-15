@@ -94,3 +94,75 @@ directory = "{}"
         std::env::remove_var("ZL_EXPENSE_RETENTION_ORIGINAL_RECEIPT_DAYS");
     }
 }
+
+#[test]
+fn load_config_rejects_credential_path_traversal() {
+    let _guard = env_test_lock();
+    unsafe {
+        std::env::remove_var("TEST_DATABASE_URL");
+        std::env::remove_var("ZL_EXPENSE_DATABASE_URL");
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[database]
+url_credential = "../../etc/passwd"
+
+[credentials]
+directory = "/etc/zl-expense/credentials"
+"#,
+    )
+    .expect("config");
+
+    let err = load_config(Some(&config_path)).expect_err("unsafe reference must fail");
+    assert_eq!(err.class.as_str(), "config_error");
+    assert!(!err.message.contains("passwd"));
+}
+
+#[test]
+fn omitted_file_values_keep_default_source_attribution() {
+    let _guard = env_test_lock();
+    unsafe {
+        std::env::set_var("ZL_EXPENSE_DATABASE_URL", "postgres://localhost/test");
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, "[retention]\noriginal_receipt_days = 14\n").expect("config");
+
+    let resolved = load_config(Some(&config_path)).expect("load");
+    assert_eq!(
+        resolved
+            .attribution
+            .get("retention.original_receipt_days")
+            .expect("retention attribution")
+            .source,
+        zl_expense::config::ConfigSource::File
+    );
+    assert_eq!(
+        resolved
+            .attribution
+            .get("database.max_connections")
+            .expect("database attribution")
+            .source,
+        zl_expense::config::ConfigSource::Default
+    );
+    unsafe {
+        std::env::remove_var("ZL_EXPENSE_DATABASE_URL");
+    }
+}
+
+#[test]
+fn invalid_toml_error_does_not_echo_values() {
+    let _guard = env_test_lock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, "unexpected_secret = \"do-not-echo-this\"\n").expect("config");
+
+    let err = load_config(Some(&config_path)).expect_err("unknown value must fail");
+    assert_eq!(err.message, "invalid config TOML");
+    assert!(!err.message.contains("do-not-echo-this"));
+}

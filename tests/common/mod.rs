@@ -27,6 +27,11 @@ pub fn skip_without_database(test_name: &str) -> Option<String> {
     })
 }
 
+pub fn available_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    listener.local_addr().expect("local address").port()
+}
+
 pub struct TestConfig {
     pub dir: TempDir,
     pub config_path: PathBuf,

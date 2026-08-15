@@ -4,8 +4,10 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde::Serialize;
+use sqlx::postgres::PgConnectOptions;
 
 use crate::error::AppError;
 
@@ -58,16 +60,17 @@ impl ResolvedConfig {
 pub fn load_config(config_path: Option<&Path>) -> Result<ResolvedConfig, AppError> {
     let mut attribution = BTreeMap::new();
     let mut cfg = Config::default();
+    record_default_sources(&mut attribution);
 
     if let Some(path) = config_path {
-        let contents = fs::read_to_string(path)
-            .map_err(|e| AppError::config(format!("failed to read config file: {}", e)))?;
-        let file_cfg: Config = toml::from_str(&contents)
-            .map_err(|e| AppError::config(format!("invalid config TOML: {}", e)))?;
+        let contents =
+            fs::read_to_string(path).map_err(|_| AppError::config("failed to read config file"))?;
+        let document: toml::Value =
+            toml::from_str(&contents).map_err(|_| AppError::config("invalid config TOML"))?;
+        let file_cfg: Config =
+            toml::from_str(&contents).map_err(|_| AppError::config("invalid config TOML"))?;
         merge_config(&mut cfg, &file_cfg);
-        record_file_sources(&mut attribution, &file_cfg);
-    } else {
-        record_default_sources(&mut attribution);
+        record_file_sources(&mut attribution, &file_cfg, &document);
     }
 
     apply_env_overrides(&mut cfg, &mut attribution)?;
@@ -76,6 +79,8 @@ pub fn load_config(config_path: Option<&Path>) -> Result<ResolvedConfig, AppErro
 
     let credentials_dir = PathBuf::from(&cfg.credentials.directory);
     let database_url = resolve_database_url(&cfg, &credentials_dir)?;
+    PgConnectOptions::from_str(&database_url)
+        .map_err(|_| AppError::config("database credential is not a valid PostgreSQL URL"))?;
 
     let resolved = ResolvedConfig {
         listen_address: cfg.server.listen_address.clone(),
@@ -160,60 +165,68 @@ fn record_default_sources(attribution: &mut BTreeMap<String, ResolvedValue>) {
     );
 }
 
-fn record_file_sources(attribution: &mut BTreeMap<String, ResolvedValue>, cfg: &Config) {
-    insert_attr(
-        attribution,
-        "server.listen_address",
-        cfg.server.listen_address.clone(),
-        ConfigSource::File,
+fn record_file_sources(
+    attribution: &mut BTreeMap<String, ResolvedValue>,
+    cfg: &Config,
+    document: &toml::Value,
+) {
+    macro_rules! record {
+        ($section:literal, $field:literal, $value:expr) => {
+            if document
+                .get($section)
+                .and_then(|section| section.get($field))
+                .is_some()
+            {
+                insert_attr(
+                    attribution,
+                    concat!($section, ".", $field),
+                    $value,
+                    ConfigSource::File,
+                );
+            }
+        };
+    }
+
+    record!(
+        "server",
+        "listen_address",
+        cfg.server.listen_address.clone()
     );
-    insert_attr(
-        attribution,
-        "database.url_credential",
-        cfg.database.url_credential.clone(),
-        ConfigSource::File,
+    record!(
+        "database",
+        "url_credential",
+        cfg.database.url_credential.clone()
     );
-    insert_attr(
-        attribution,
-        "database.max_connections",
-        cfg.database.max_connections,
-        ConfigSource::File,
+    record!("database", "max_connections", cfg.database.max_connections);
+    record!(
+        "concurrency",
+        "receipt_extraction",
+        cfg.concurrency.receipt_extraction
     );
-    insert_attr(
-        attribution,
-        "concurrency.receipt_extraction",
-        cfg.concurrency.receipt_extraction,
-        ConfigSource::File,
+    record!(
+        "concurrency",
+        "outbound_delivery",
+        cfg.concurrency.outbound_delivery
     );
-    insert_attr(
-        attribution,
-        "concurrency.outbound_delivery",
-        cfg.concurrency.outbound_delivery,
-        ConfigSource::File,
+    record!(
+        "retention",
+        "original_receipt_days",
+        cfg.retention.original_receipt_days
     );
-    insert_attr(
-        attribution,
-        "retention.original_receipt_days",
-        cfg.retention.original_receipt_days,
-        ConfigSource::File,
+    record!(
+        "credentials",
+        "directory",
+        cfg.credentials.directory.clone()
     );
-    insert_attr(
-        attribution,
-        "credentials.directory",
-        cfg.credentials.directory.clone(),
-        ConfigSource::File,
+    record!(
+        "zalo",
+        "bot_token_credential",
+        cfg.zalo.bot_token_credential.clone()
     );
-    insert_attr(
-        attribution,
-        "zalo.bot_token_credential",
-        cfg.zalo.bot_token_credential.clone(),
-        ConfigSource::File,
-    );
-    insert_attr(
-        attribution,
-        "zalo.webhook_secret_credential",
-        cfg.zalo.webhook_secret_credential.clone(),
-        ConfigSource::File,
+    record!(
+        "zalo",
+        "webhook_secret_credential",
+        cfg.zalo.webhook_secret_credential.clone()
     );
 }
 
@@ -312,8 +325,15 @@ fn insert_attr<T: Serialize>(
 }
 
 fn validate_resolved(cfg: &Config) -> Result<(), AppError> {
-    if cfg.server.listen_address.trim().is_empty() {
-        return Err(AppError::config("server.listen_address must not be empty"));
+    if cfg
+        .server
+        .listen_address
+        .parse::<std::net::SocketAddr>()
+        .is_err()
+    {
+        return Err(AppError::config(
+            "server.listen_address must be a valid IP socket address",
+        ));
     }
     if cfg.database.max_connections == 0 {
         return Err(AppError::config(
@@ -335,22 +355,33 @@ fn validate_resolved(cfg: &Config) -> Result<(), AppError> {
             "retention.original_receipt_days must be between 1 and 30",
         ));
     }
-    if cfg.database.url_credential.trim().is_empty() {
+    if !valid_credential_reference(&cfg.database.url_credential) {
         return Err(AppError::config(
-            "database.url_credential must not be empty",
+            "database.url_credential must be a safe credential name",
         ));
     }
-    if cfg.zalo.bot_token_credential.trim().is_empty() {
+    if !valid_credential_reference(&cfg.zalo.bot_token_credential) {
         return Err(AppError::config(
-            "zalo.bot_token_credential must not be empty",
+            "zalo.bot_token_credential must be a safe credential name",
         ));
     }
-    if cfg.zalo.webhook_secret_credential.trim().is_empty() {
+    if !valid_credential_reference(&cfg.zalo.webhook_secret_credential) {
         return Err(AppError::config(
-            "zalo.webhook_secret_credential must not be empty",
+            "zalo.webhook_secret_credential must be a safe credential name",
         ));
+    }
+    if cfg.credentials.directory.trim().is_empty() {
+        return Err(AppError::config("credentials.directory must not be empty"));
     }
     Ok(())
+}
+
+fn valid_credential_reference(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 /// Resolve database URL from credential file or TEST_DATABASE_URL / ZL_EXPENSE_DATABASE_URL env.

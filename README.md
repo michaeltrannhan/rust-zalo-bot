@@ -14,9 +14,9 @@ Privacy-conscious self-hosted Zalo expense bot (Rust walking skeleton).
 ```bash
 export TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/zl_expense'
 cargo test
-cargo run -- config validate --config config/example.toml
-cargo run -- db migrate --config config/example.toml
-cargo run -- run --config config/example.toml
+cargo run -- --config config/config.example.toml config validate
+cargo run -- --config config/config.example.toml db migrate
+cargo run -- --config config/config.example.toml run
 ```
 
 Credential references resolve from `credentials.directory` in config. For CI and local tests, set `TEST_DATABASE_URL` or `ZL_EXPENSE_DATABASE_URL` to bypass credential files.

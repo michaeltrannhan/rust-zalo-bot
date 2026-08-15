@@ -1,2 +1,4 @@
 .agents/runs/
 .agents/worktrees/
+/target/
+/dist/

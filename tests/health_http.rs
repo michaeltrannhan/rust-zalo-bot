@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use assert_cmd::cargo::cargo_bin;
 use reqwest::StatusCode;
+use sqlx::postgres::PgPoolOptions;
 use tokio::time::sleep;
+use uuid::Uuid;
 
 fn binary_path() -> std::path::PathBuf {
     cargo_bin("zl-expense")
@@ -32,7 +34,8 @@ async fn health_live_always_reports_live_while_process_running() {
         None => return,
     };
 
-    let cfg = common::TestConfig::valid_with_port(&db_url, 18080);
+    let port = common::available_port();
+    let cfg = common::TestConfig::valid_with_port(&db_url, port);
     let status = StdCommand::new(binary_path())
         .args([
             "--config",
@@ -51,7 +54,7 @@ async fn health_live_always_reports_live_while_process_running() {
 
     let client = reqwest::Client::new();
     let response = client
-        .get("http://127.0.0.1:18080/health/live")
+        .get(format!("http://127.0.0.1:{port}/health/live"))
         .timeout(Duration::from_secs(5))
         .send()
         .await
@@ -74,7 +77,8 @@ async fn health_ready_true_when_db_migrated() {
         None => return,
     };
 
-    let cfg = common::TestConfig::valid_with_port(&db_url, 18081);
+    let port = common::available_port();
+    let cfg = common::TestConfig::valid_with_port(&db_url, port);
     let status = StdCommand::new(binary_path())
         .args([
             "--config",
@@ -93,7 +97,7 @@ async fn health_ready_true_when_db_migrated() {
 
     let client = reqwest::Client::new();
     let response = client
-        .get("http://127.0.0.1:18081/health/ready")
+        .get(format!("http://127.0.0.1:{port}/health/ready"))
         .timeout(Duration::from_secs(5))
         .send()
         .await
@@ -118,34 +122,46 @@ async fn migrations_current_false_before_apply() {
 
     let cfg = common::TestConfig::valid(&db_url);
     let resolved = zl_expense::config::load_config(Some(cfg.path())).expect("config");
-    let pool = zl_expense::db::create_pool(&resolved).await.expect("pool");
-
-    sqlx::query("DROP TABLE IF EXISTS _sqlx_migrations")
-        .execute(&pool)
+    let admin_pool = zl_expense::db::create_pool(&resolved)
         .await
-        .expect("drop migrations");
+        .expect("admin pool");
+    let schema = format!("m1_test_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin_pool)
+        .await
+        .expect("create isolated schema");
+
+    let search_path = schema.clone();
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(move |connection, _metadata| {
+            let statement = format!("SET search_path TO {search_path}");
+            Box::pin(async move {
+                sqlx::query(&statement).execute(connection).await?;
+                Ok(())
+            })
+        })
+        .connect(&db_url)
+        .await
+        .expect("isolated pool");
 
     let pending = zl_expense::db::check_migrations_current(&pool)
         .await
         .expect("check");
     assert!(!pending);
 
-    reset_schema(&pool).await;
     zl_expense::db::migrate(&pool)
         .await
-        .expect("restore schema");
-}
+        .expect("migrate isolated schema");
+    assert!(
+        zl_expense::db::check_migrations_current(&pool)
+            .await
+            .expect("check after migrate")
+    );
 
-async fn reset_schema(pool: &sqlx::PgPool) {
-    for table in [
-        "ingress_control",
-        "inbound_events",
-        "provider_identities",
-        "accounts",
-        "schema_metadata",
-        "_sqlx_migrations",
-    ] {
-        let sql = format!("DROP TABLE IF EXISTS {} CASCADE", table);
-        sqlx::query(&sql).execute(pool).await.expect("drop table");
-    }
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin_pool)
+        .await
+        .expect("drop isolated schema");
 }

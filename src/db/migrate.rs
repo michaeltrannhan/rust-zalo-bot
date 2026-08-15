@@ -30,7 +30,7 @@ pub async fn migrate(pool: &PgPool) -> Result<(), AppError> {
     MIGRATOR
         .run(pool)
         .await
-        .map_err(|e| AppError::migration(format!("migration failed: {}", e)))?;
+        .map_err(|_| AppError::migration("migration failed"))?;
     Ok(())
 }
 

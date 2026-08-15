@@ -62,7 +62,7 @@ pub async fn execute(cli: Cli) -> ExitCode {
     init_tracing();
 
     match run_command(cli).await {
-        Ok(()) => ExitCode::Success,
+        Ok(code) => code,
         Err(err) => {
             eprintln!("{}", err.to_json_line());
             err.exit_code()
@@ -70,7 +70,7 @@ pub async fn execute(cli: Cli) -> ExitCode {
     }
 }
 
-async fn run_command(cli: Cli) -> Result<(), AppError> {
+async fn run_command(cli: Cli) -> Result<ExitCode, AppError> {
     let config_path = cli.config.as_deref();
 
     match cli.command {
@@ -92,20 +92,17 @@ async fn run_command(cli: Cli) -> Result<(), AppError> {
         Commands::Run { roles } => {
             let resolved = load_config(config_path)?;
             let parsed_roles = parse_roles(&roles)?;
-            let code = run(
+            return Ok(run(
                 resolved,
                 RuntimeOptions {
                     roles: parsed_roles,
                 },
             )
-            .await;
-            if code != ExitCode::Success {
-                return Err(AppError::internal("runtime exited with failure"));
-            }
+            .await);
         }
     }
 
-    Ok(())
+    Ok(ExitCode::Success)
 }
 
 fn init_tracing() {
@@ -116,5 +113,6 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_target(false)
         .without_time()
-        .init();
+        .try_init()
+        .ok();
 }

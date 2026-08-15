@@ -3,6 +3,7 @@
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -19,6 +20,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "default_listen_address")]
     pub listen_address: String,
@@ -37,6 +39,7 @@ impl Default for ServerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DatabaseConfig {
     #[serde(default = "default_url_credential")]
     pub url_credential: String,
@@ -62,6 +65,7 @@ impl Default for DatabaseConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConcurrencyConfig {
     #[serde(default = "default_receipt_extraction")]
     pub receipt_extraction: u32,
@@ -87,6 +91,7 @@ impl Default for ConcurrencyConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetentionConfig {
     #[serde(default = "default_retention_days")]
     pub original_receipt_days: u32,
@@ -105,6 +110,7 @@ impl Default for RetentionConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CredentialsConfig {
     #[serde(default = "default_credentials_dir")]
     pub directory: String,
@@ -123,6 +129,7 @@ impl Default for CredentialsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ZaloConfig {
     #[serde(default = "default_bot_token_credential")]
     pub bot_token_credential: String,

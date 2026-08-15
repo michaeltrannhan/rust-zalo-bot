@@ -12,9 +12,13 @@ CREATE TABLE accounts (
     lifecycle_state TEXT NOT NULL CHECK (
         lifecycle_state IN ('pending_consent', 'active', 'suspended', 'deleting', 'deleted')
     ),
-    locale TEXT NOT NULL DEFAULT 'vi',
+    consent_version TEXT,
+    consented_at TIMESTAMPTZ,
+    locale TEXT NOT NULL DEFAULT 'vi-VN',
     timezone TEXT NOT NULL DEFAULT 'Asia/Ho_Chi_Minh',
-    retention_preference_days INTEGER,
+    retention_preference_days INTEGER NOT NULL DEFAULT 7 CHECK (
+        retention_preference_days BETWEEN 1 AND 30
+    ),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

@@ -7,8 +7,6 @@ use tracing::info;
 
 use crate::health::ReadinessState;
 
-const SHUTDOWN_DEADLINE_SECS: u64 = 30;
-
 /// Signals shutdown to supervised tasks.
 pub struct ShutdownSignal {
     shutdown_tx: watch::Sender<bool>,
@@ -49,8 +47,5 @@ impl ShutdownSignal {
         info!("marking readiness false before shutdown");
         self.readiness.mark_shutting_down();
         let _ = self.shutdown_tx.send(true);
-
-        tokio::time::sleep(std::time::Duration::from_secs(SHUTDOWN_DEADLINE_SECS)).await;
-        info!("shutdown deadline elapsed");
     }
 }

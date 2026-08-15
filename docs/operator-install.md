@@ -46,8 +46,10 @@ conffile; first install copies the example only when missing.
    database_url = "postgres://zl_expense:zl_expense_dev@127.0.0.1:5432/zl_expense"
    ```
 
-5. Store secrets with the CLI (Milestone 1 core) under `/etc/zl-expense/credentials/`.
-   Do not place secrets in `config.toml`.
+5. Provision the database credential file named by `database.url_credential`
+   under `/etc/zl-expense/credentials/`, owned by root and readable by the
+   service group. Interactive `secret set` arrives in Milestone 7. Do not place
+   secret values in `config.toml` or command arguments.
 
 6. Apply migrations:
 
@@ -98,7 +100,7 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        client_max_body_size 8m;
+        client_max_body_size 1m;
     }
 
     location /health/ {
