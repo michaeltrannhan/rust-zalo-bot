@@ -129,9 +129,10 @@ impl IngressStore {
                 recent_expenses: Vec::new(),
                 sender_allowed: false,
                 user_text: request.user_text.clone(),
-                provider_scope: request.provider_scope.clone(),
-                provider_event_id: request.provider_event_id.clone(),
-                provider_sender_id: request.provider_sender_id.clone(),
+                timezone: "Asia/Ho_Chi_Minh".to_string(),
+                original_receipt_retention_days: 7,
+                next_expense_id: Uuid::new_v4(),
+                now: request.observed_at,
             }
         };
 
@@ -298,7 +299,8 @@ async fn load_decision_context(
         .parse::<LifecycleState>()
         .map_err(|_| IngressEffectError::InvalidTransition)?;
 
-    let pending_row: Option<(String, Option<String>, DateTime<Utc>, i32)> = sqlx::query_as(
+    type PendingActionRow = (Option<String>, Option<String>, Option<DateTime<Utc>>, i32);
+    let pending_row: Option<PendingActionRow> = sqlx::query_as(
         r#"
         SELECT pending_action_type, pending_payload_ref, expires_at, version
         FROM conversation_states
@@ -310,21 +312,13 @@ async fn load_decision_context(
     .await
     .map_err(|_| IngressEffectError::InvalidTransition)?;
 
-    let pending_action =
-        pending_row.map(
-            |(action_type, payload_ref, expires_at, version)| PendingAction {
-                action_type,
-                payload_ref,
-                expires_at,
-                version,
-            },
-        );
-
-    let timezone: String = sqlx::query_scalar("SELECT timezone FROM accounts WHERE id = $1")
-        .bind(account_id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|_| IngressEffectError::InvalidTransition)?;
+    let account_preferences: (String, i32) =
+        sqlx::query_as("SELECT timezone, retention_preference_days FROM accounts WHERE id = $1")
+            .bind(account_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|_| IngressEffectError::InvalidTransition)?;
+    let (timezone, retention_days) = account_preferences;
 
     let today_total: Option<(i64, String)> = sqlx::query_as(
         r#"
@@ -369,7 +363,7 @@ async fn load_decision_context(
     .await
     .map_err(|_| IngressEffectError::InvalidTransition)?;
 
-    let recent_expenses = recent_rows
+    let recent_expenses: Vec<RecentExpense> = recent_rows
         .into_iter()
         .filter_map(
             |(id, amount_minor, currency, occurred_at, description, source, state, version)| {
@@ -390,6 +384,30 @@ async fn load_decision_context(
         )
         .collect();
 
+    let pending_action = pending_row.and_then(|(action_type, payload_ref, expires_at, version)| {
+        match (action_type, expires_at) {
+            (Some(action_type), Some(expires_at)) => {
+                let expense = payload_ref
+                    .as_deref()
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .and_then(|id| {
+                        recent_expenses
+                            .iter()
+                            .find(|expense| expense.id == id)
+                            .cloned()
+                    });
+                Some(PendingAction {
+                    action_type,
+                    payload_ref,
+                    expires_at,
+                    version,
+                    expense,
+                })
+            }
+            _ => None,
+        }
+    });
+
     Ok(DecisionContext {
         account_id: Some(account_id),
         lifecycle_state: Some(lifecycle),
@@ -400,9 +418,10 @@ async fn load_decision_context(
         recent_expenses,
         sender_allowed: true,
         user_text: request.user_text.clone(),
-        provider_scope: request.provider_scope.clone(),
-        provider_event_id: request.provider_event_id.clone(),
-        provider_sender_id: request.provider_sender_id.clone(),
+        timezone,
+        original_receipt_retention_days: retention_days as u32,
+        next_expense_id: Uuid::new_v4(),
+        now: request.observed_at,
     })
 }
 
@@ -432,7 +451,7 @@ async fn apply_effect(
                     consent_version = $2,
                     consented_at = NOW(),
                     updated_at = NOW()
-                WHERE id = $1
+                WHERE id = $1 AND lifecycle_state = 'pending_consent'
                 "#,
             )
             .bind(account_id)
@@ -450,14 +469,17 @@ async fn apply_effect(
             currency,
             description,
             occurred_at,
+            optimistic_version,
+            pending_expires_at,
             pending_action_type,
         } => {
             sqlx::query(
                 r#"
                 INSERT INTO expenses (
-                    id, account_id, amount_minor, currency, occurred_at, description, source, state
+                    id, account_id, amount_minor, currency, occurred_at, description, source, state,
+                    version
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, 'manual', 'awaiting_confirmation')
+                VALUES ($1, $2, $3, $4, $5, $6, 'manual', 'awaiting_confirmation', $7)
                 "#,
             )
             .bind(expense_id)
@@ -466,17 +488,17 @@ async fn apply_effect(
             .bind(currency)
             .bind(occurred_at)
             .bind(description)
+            .bind(optimistic_version)
             .execute(&mut **tx)
             .await
             .map_err(|_| IngressEffectError::InvalidTransition)?;
 
-            let expires_at = *occurred_at + chrono::Duration::hours(24);
             upsert_pending_action(
                 tx,
                 account_id,
                 pending_action_type,
                 Some(expense_id.to_string()),
-                expires_at,
+                *pending_expires_at,
                 None,
             )
             .await?;
@@ -684,7 +706,7 @@ async fn enqueue_reply(
     .bind(inbound_event_id)
     .bind(idempotency_key)
     .bind(&request.provider_scope)
-    .bind(&request.provider_sender_id)
+    .bind(&request.provider_chat_id)
     .bind(&reply.body)
     .execute(&mut **tx)
     .await

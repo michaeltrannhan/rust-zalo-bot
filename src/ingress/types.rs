@@ -114,6 +114,7 @@ pub struct PendingAction {
     pub payload_ref: Option<String>,
     pub expires_at: DateTime<Utc>,
     pub version: i32,
+    pub expense: Option<RecentExpense>,
 }
 
 /// Recent expense row exposed to the pure decision callback.
@@ -141,9 +142,10 @@ pub struct DecisionContext {
     pub recent_expenses: Vec<RecentExpense>,
     pub sender_allowed: bool,
     pub user_text: String,
-    pub provider_scope: String,
-    pub provider_event_id: String,
-    pub provider_sender_id: String,
+    pub timezone: String,
+    pub original_receipt_retention_days: u32,
+    pub next_expense_id: Uuid,
+    pub now: DateTime<Utc>,
 }
 
 /// Reply intent enqueued atomically with domain effects.
@@ -166,6 +168,8 @@ pub struct IngressRequest {
     pub provider_scope: String,
     pub provider_event_id: String,
     pub provider_sender_id: String,
+    pub provider_chat_id: String,
     pub sender_allowed: bool,
     pub user_text: String,
+    pub observed_at: DateTime<Utc>,
 }

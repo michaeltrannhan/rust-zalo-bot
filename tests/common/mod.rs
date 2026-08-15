@@ -12,7 +12,9 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Serialize integration tests that share listen ports and database state.
 pub fn integration_lock() -> MutexGuard<'static, ()> {
-    TEST_LOCK.lock().expect("integration test lock")
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Returns TEST_DATABASE_URL when set, otherwise None.

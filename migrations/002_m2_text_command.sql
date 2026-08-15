@@ -18,21 +18,23 @@ CREATE TABLE conversation_states (
     CHECK (
         (pending_action_type IS NULL AND pending_payload_ref IS NULL AND expires_at IS NULL)
         OR (pending_action_type IS NOT NULL AND expires_at IS NOT NULL)
-    )
+    ),
+    CHECK (pending_action_type IS NULL OR pending_action_type IN ('manual_expense_confirmation')),
+    CHECK (version > 0)
 );
 
 CREATE TABLE expenses (
     id UUID PRIMARY KEY,
     account_id UUID NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
     amount_minor BIGINT NOT NULL,
-    currency CHAR(3) NOT NULL,
+    currency CHAR(3) NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
     occurred_at TIMESTAMPTZ NOT NULL,
     description TEXT NOT NULL,
     source TEXT NOT NULL CHECK (source IN ('manual', 'receipt')),
     state TEXT NOT NULL CHECK (
         state IN ('awaiting_confirmation', 'confirmed', 'rejected')
     ),
-    version INTEGER NOT NULL DEFAULT 1,
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -47,10 +49,14 @@ CREATE TABLE outbound_messages (
     idempotency_key TEXT NOT NULL UNIQUE,
     provider_scope TEXT NOT NULL,
     provider_target TEXT NOT NULL,
-    body TEXT NOT NULL,
+    body TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 2000),
     state TEXT NOT NULL CHECK (
         state IN ('queued', 'sending', 'sent', 'failed', 'suppressed', 'ambiguous')
     ),
+    provider_message_id TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    last_error_class TEXT,
+    ambiguity_metadata JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

@@ -15,6 +15,8 @@ pub enum IngressEffect {
         currency: String,
         description: String,
         occurred_at: DateTime<Utc>,
+        optimistic_version: i32,
+        pending_expires_at: DateTime<Utc>,
         pending_action_type: String,
     },
     ConfirmExpense {
