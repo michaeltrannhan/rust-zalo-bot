@@ -1,0 +1,19 @@
+{
+  "ok": true,
+  "result": {
+    "event_name": "message.text.received",
+    "message": {
+      "message_id": "envelope-msg-001",
+      "from": {
+        "id": "sender-envelope-42",
+        "display_name": "Envelope User"
+      },
+      "chat": {
+        "id": "chat-envelope-99",
+        "chat_type": "PRIVATE"
+      },
+      "date": 1750316131602,
+      "text": "hello from envelope"
+    }
+  }
+}
