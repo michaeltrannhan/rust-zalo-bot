@@ -6,12 +6,14 @@ mod shutdown;
 pub use roles::{Role, RuntimeOptions, all_roles, parse_roles};
 pub use shutdown::ShutdownSignal;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tracing::{error, info};
+use tokio::task::{JoinHandle, JoinSet};
+use tracing::{error, info, warn};
 
 use crate::config::ResolvedConfig;
 use crate::db::{check_connection, check_migrations_current, create_pool, migrate};
@@ -19,8 +21,14 @@ use crate::error::{AppError, ExitCode};
 use crate::health::ReadinessState;
 use crate::http::{AppState, WebhookService, router};
 use crate::ingress::IngressStore;
-use crate::outbound::deliver_next;
+use crate::outbound::{OutboundJobExecution, deliver_for_job};
 use crate::provider::{ZaloHttpAdapter, ZaloHttpConfig};
+use crate::work::{ClaimOptions, ClaimedJob, WorkStore};
+
+const CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const SHUTDOWN_DRAIN_DEADLINE: Duration = Duration::from_secs(30);
+
+type RoleResult = Result<(), AppError>;
 
 /// Run the supervised runtime until shutdown or critical failure.
 pub async fn run(config: ResolvedConfig, options: RuntimeOptions) -> ExitCode {
@@ -96,72 +104,89 @@ pub async fn run(config: ResolvedConfig, options: RuntimeOptions) -> ExitCode {
 
     info!(roles = ?roles, "starting supervised runtime");
 
-    let http_task = if roles.contains(&Role::Ingress) {
+    let mut role_tasks: HashMap<&'static str, JoinHandle<RoleResult>> = HashMap::new();
+
+    if roles.contains(&Role::Ingress) {
         let listen = config.listen_address.clone();
         let router = router(app_state);
         let shutdown_rx = shutdown_rx.clone();
-        Some(tokio::spawn(async move {
-            let listener = TcpListener::bind(&listen)
-                .await
-                .map_err(|e| AppError::internal(format!("failed to bind {}: {}", listen, e)))?;
-            info!(address = %listen, "http server listening");
-            axum::serve(listener, router)
-                .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
-                .await
-                .map_err(|e| AppError::internal(format!("http server error: {}", e)))
-        }))
-    } else {
-        None
-    };
-
-    let worker_task = if roles.contains(&Role::Worker) {
-        Some(outbound_worker_task(
-            pool.clone(),
-            Arc::clone(zalo_adapter.as_ref().expect("adapter initialized")),
-            shutdown_rx.clone(),
-        ))
-    } else {
-        None
-    };
-    let scheduler_task = role_idle_task(
-        Role::Scheduler,
-        roles.contains(&Role::Scheduler),
-        shutdown_rx.clone(),
-    );
-    let maintenance_task = role_idle_task(
-        Role::Maintenance,
-        roles.contains(&Role::Maintenance),
-        shutdown_rx.clone(),
-    );
-
-    let shutdown_listener = tokio::spawn(shutdown_signal.listen());
-
-    let mut critical_failure = false;
-
-    if let Some(task) = http_task {
-        match task.await {
-            Ok(Err(e)) => {
-                error!(error_class = %e.class, "critical http task failed");
-                critical_failure = true;
-            }
-            Err(e) => {
-                error!(error_class = "internal", "http task join error: {}", e);
-                critical_failure = true;
-            }
-            Ok(Ok(())) => {}
-        }
-    } else {
-        let _ = shutdown_listener.await;
+        role_tasks.insert(
+            "ingress",
+            tokio::spawn(async move {
+                let listener = TcpListener::bind(&listen)
+                    .await
+                    .map_err(|e| AppError::internal(format!("failed to bind {}: {}", listen, e)))?;
+                info!(address = %listen, "http server listening");
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
+                    .await
+                    .map_err(|e| AppError::internal(format!("http server error: {}", e)))
+            }),
+        );
     }
 
+    if roles.contains(&Role::Worker) {
+        role_tasks.insert(
+            "worker",
+            outbound_worker_task(
+                pool.clone(),
+                Arc::clone(zalo_adapter.as_ref().expect("adapter initialized")),
+                config.outbound_delivery,
+                config.zalo_send_timeout_seconds,
+                shutdown_rx.clone(),
+            ),
+        );
+    }
+
+    if roles.contains(&Role::Scheduler) {
+        role_tasks.insert(
+            "scheduler",
+            role_idle_task(Role::Scheduler, shutdown_rx.clone()),
+        );
+    }
+
+    if roles.contains(&Role::Maintenance) {
+        role_tasks.insert(
+            "maintenance",
+            role_idle_task(Role::Maintenance, shutdown_rx.clone()),
+        );
+    }
+
+    let mut shutdown_listener = tokio::spawn(shutdown_signal.listen());
+
+    let critical_failure = tokio::select! {
+        result = &mut shutdown_listener => {
+            match result {
+                Ok(()) => false,
+                Err(join_error) => {
+                    error!(error_class = "internal", "shutdown listener join error: {}", join_error);
+                    true
+                }
+            }
+        }
+        result = wait_for_role_failure(&mut role_tasks, shutdown_rx.clone()) => {
+            if let Some((role, error)) = result {
+                error!(role, error_class = %error.class, "critical role task failed");
+            } else {
+                error!(error_class = "internal", "critical role task panicked");
+            }
+            true
+        }
+    };
+
     if critical_failure {
+        shutdown_listener.abort();
         readiness.mark_shutting_down();
         let _ = shutdown_tx.send(true);
-        cancel_role_tasks(worker_task, scheduler_task, maintenance_task);
+        abort_role_tasks(&mut role_tasks);
+        let _ = drain_role_tasks(&mut role_tasks, Duration::from_secs(5)).await;
         return ExitCode::RuntimeError;
     }
 
-    await_role_tasks(worker_task, scheduler_task, maintenance_task).await;
+    if let Err(error) = drain_role_tasks(&mut role_tasks, SHUTDOWN_DRAIN_DEADLINE).await {
+        error!(error_class = %error.class, "role task failed during shutdown");
+        return ExitCode::RuntimeError;
+    }
 
     info!("runtime shutdown complete");
     ExitCode::Success
@@ -170,90 +195,354 @@ pub async fn run(config: ResolvedConfig, options: RuntimeOptions) -> ExitCode {
 fn outbound_worker_task(
     pool: sqlx::PgPool,
     adapter: Arc<ZaloHttpAdapter>,
+    outbound_delivery: u32,
+    send_timeout_seconds: u64,
     mut shutdown_rx: watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
+) -> JoinHandle<RoleResult> {
     tokio::spawn(async move {
         info!(role = Role::Worker.as_str(), "role task started");
+
+        let store = WorkStore::new(pool.clone());
+        let lease_owner = process_lease_owner();
+        let lease_duration_secs = worker_lease_duration_secs(send_timeout_seconds);
+        let heartbeat_interval = worker_heartbeat_interval(lease_duration_secs);
+        let concurrency = usize::try_from(outbound_delivery).unwrap_or(1).max(1);
+        let mut in_flight = JoinSet::new();
+
         while !*shutdown_rx.borrow() {
-            match deliver_next(&pool, &adapter).await {
-                Ok(Some(result)) => {
-                    info!(
-                        outcome = result.state.as_str(),
-                        "outbound delivery finished"
-                    );
-                    continue;
+            if in_flight.len() >= concurrency {
+                tokio::select! {
+                    joined = in_flight.join_next() => {
+                        observe_handler_result(joined)?;
+                    }
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
                 }
-                Ok(None) => {}
-                Err(_) => error!(
-                    error_class = "dependency_error",
-                    "outbound store unavailable"
-                ),
+                continue;
             }
 
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
-                changed = shutdown_rx.changed() => {
-                    if changed.is_err() {
-                        break;
+            let claimed = match store
+                .claim(ClaimOptions {
+                    batch_limit: 1,
+                    lease_owner: lease_owner.clone(),
+                    lease_duration_secs,
+                })
+                .await
+            {
+                Ok(jobs) => jobs,
+                Err(error) => {
+                    warn!(
+                        error_class = %error.class,
+                        "work claim unavailable; backing off"
+                    );
+                    tokio::select! {
+                        joined = in_flight.join_next(), if !in_flight.is_empty() => {
+                            observe_handler_result(joined)?;
+                        }
+                        should_stop = sleep_or_shutdown(CLAIM_POLL_INTERVAL, &mut shutdown_rx) => {
+                            if should_stop {
+                                break;
+                            }
+                        }
                     }
+                    continue;
+                }
+            };
+
+            let Some(job) = claimed.into_iter().next() else {
+                tokio::select! {
+                    joined = in_flight.join_next(), if !in_flight.is_empty() => {
+                        observe_handler_result(joined)?;
+                    }
+                    should_stop = sleep_or_shutdown(CLAIM_POLL_INTERVAL, &mut shutdown_rx) => {
+                        if should_stop {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            };
+
+            let store = store.clone();
+            let pool = pool.clone();
+            let adapter = Arc::clone(&adapter);
+            let mut shutdown_rx = shutdown_rx.clone();
+            in_flight.spawn(async move {
+                let execution = execute_leased_job(
+                    &store,
+                    &pool,
+                    &adapter,
+                    &job,
+                    lease_duration_secs,
+                    heartbeat_interval,
+                    &mut shutdown_rx,
+                )
+                .await;
+                apply_execution_result(&store, &job, execution).await;
+            });
+        }
+
+        drain_in_flight_handlers(&mut in_flight, SHUTDOWN_DRAIN_DEADLINE).await?;
+
+        info!(role = Role::Worker.as_str(), "role task stopped");
+        Ok(())
+    })
+}
+
+async fn execute_leased_job(
+    store: &WorkStore,
+    pool: &sqlx::PgPool,
+    adapter: &Arc<ZaloHttpAdapter>,
+    job: &ClaimedJob,
+    lease_duration_secs: i64,
+    heartbeat_interval: Duration,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> OutboundJobExecution {
+    let delivery = deliver_for_job(pool, adapter, job);
+    tokio::pin!(delivery);
+
+    let mut heartbeat = tokio::time::interval(heartbeat_interval);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            result = &mut delivery => {
+                return match result {
+                    Ok(execution) => execution,
+                    Err(_) => OutboundJobExecution::Fail(crate::error::ErrorClass::Dependency),
+                };
+            }
+            _ = heartbeat.tick() => {
+                if store
+                    .heartbeat(job.id, job.lease_token, lease_duration_secs)
+                    .await
+                    .is_err()
+                {
+                    return OutboundJobExecution::StaleLease;
+                }
+            }
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    return shutdown_execution(store, job).await;
                 }
             }
         }
-        info!(role = Role::Worker.as_str(), "role task stopped");
+    }
+}
+
+async fn shutdown_execution(store: &WorkStore, job: &ClaimedJob) -> OutboundJobExecution {
+    match store
+        .fail(job.id, job.lease_token, crate::error::ErrorClass::Transient)
+        .await
+    {
+        Ok(_) => OutboundJobExecution::StaleLease,
+        Err(error) if error.class == crate::error::ErrorClass::Conflict => {
+            OutboundJobExecution::StaleLease
+        }
+        Err(error) if error.class == crate::error::ErrorClass::Dependency => {
+            OutboundJobExecution::StaleLease
+        }
+        Err(_) => OutboundJobExecution::StaleLease,
+    }
+}
+
+async fn apply_execution_result(
+    store: &WorkStore,
+    job: &ClaimedJob,
+    execution: OutboundJobExecution,
+) {
+    match execution {
+        OutboundJobExecution::Complete(result) => {
+            if let Err(error) = store.complete(job.id, job.lease_token).await {
+                warn!(
+                    job_id = %job.id,
+                    outcome = result.state.as_str(),
+                    error_class = %error.class,
+                    "job completion rejected"
+                );
+            }
+        }
+        OutboundJobExecution::Fail(class) => {
+            if let Err(error) = store.fail(job.id, job.lease_token, class).await {
+                warn!(
+                    job_id = %job.id,
+                    error_class = %error.class,
+                    "job failure rejected"
+                );
+            }
+        }
+        OutboundJobExecution::InvalidJob => {
+            if let Err(error) = store
+                .fail(
+                    job.id,
+                    job.lease_token,
+                    crate::error::ErrorClass::Validation,
+                )
+                .await
+            {
+                warn!(
+                    job_id = %job.id,
+                    error_class = %error.class,
+                    "invalid job terminal failure rejected"
+                );
+            }
+        }
+        OutboundJobExecution::StaleLease => {}
+    }
+}
+
+fn process_lease_owner() -> String {
+    let host = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "localhost".to_string());
+    format!("{host}:{}:{}", std::process::id(), uuid::Uuid::new_v4())
+}
+
+fn worker_lease_duration_secs(send_timeout_seconds: u64) -> i64 {
+    send_timeout_seconds.saturating_mul(3).max(60) as i64
+}
+
+fn worker_heartbeat_interval(lease_duration_secs: i64) -> Duration {
+    Duration::from_secs((lease_duration_secs as u64 / 3).max(1))
+}
+
+async fn sleep_or_shutdown(duration: Duration, shutdown_rx: &mut watch::Receiver<bool>) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(duration) => *shutdown_rx.borrow(),
+        changed = shutdown_rx.changed() => changed.is_err() || *shutdown_rx.borrow(),
+    }
+}
+
+async fn drain_in_flight_handlers(in_flight: &mut JoinSet<()>, deadline: Duration) -> RoleResult {
+    let timeout = tokio::time::sleep(deadline);
+    tokio::pin!(timeout);
+
+    while !in_flight.is_empty() {
+        tokio::select! {
+            _ = &mut timeout => {
+                in_flight.abort_all();
+                while in_flight.join_next().await.is_some() {}
+                return Ok(());
+            }
+            joined = in_flight.join_next() => observe_handler_result(joined)?,
+        }
+    }
+    Ok(())
+}
+
+fn observe_handler_result(joined: Option<Result<(), tokio::task::JoinError>>) -> RoleResult {
+    match joined {
+        Some(Ok(())) | None => Ok(()),
+        Some(Err(error)) => Err(AppError::internal(format!(
+            "worker handler task failed: {error}"
+        ))),
+    }
+}
+
+async fn wait_for_role_failure(
+    role_tasks: &mut HashMap<&'static str, JoinHandle<RoleResult>>,
+    shutdown_rx: watch::Receiver<bool>,
+) -> Option<(String, AppError)> {
+    if role_tasks.is_empty() {
+        return std::future::pending().await;
+    }
+
+    loop {
+        let mut finished_role = None;
+        for (role, handle) in role_tasks.iter() {
+            if handle.is_finished() {
+                finished_role = Some(*role);
+                break;
+            }
+        }
+
+        let Some(role) = finished_role else {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            continue;
+        };
+
+        let handle = role_tasks.remove(&role).expect("role handle");
+        return Some(match handle.await {
+            Ok(Ok(())) if *shutdown_rx.borrow() => continue,
+            Ok(Ok(())) => (
+                role.to_string(),
+                AppError::internal("critical role task exited unexpectedly"),
+            ),
+            Ok(Err(error)) => (role.to_string(), error),
+            Err(join_error) => {
+                if join_error.is_panic() {
+                    return None;
+                }
+                (
+                    role.to_string(),
+                    AppError::internal(format!("role task cancelled: {join_error}")),
+                )
+            }
+        });
+    }
+}
+
+fn abort_role_tasks(role_tasks: &mut HashMap<&'static str, JoinHandle<RoleResult>>) {
+    for (_role, handle) in role_tasks.drain() {
+        handle.abort();
+    }
+}
+
+async fn drain_role_tasks(
+    role_tasks: &mut HashMap<&'static str, JoinHandle<RoleResult>>,
+    deadline: Duration,
+) -> Result<bool, AppError> {
+    let timeout = tokio::time::sleep(deadline);
+    tokio::pin!(timeout);
+
+    loop {
+        let finished = role_tasks
+            .iter()
+            .find_map(|(role, handle)| handle.is_finished().then_some(*role));
+        if let Some(role) = finished {
+            let handle = role_tasks.remove(role).expect("finished role handle");
+            match handle.await {
+                Ok(Ok(())) => continue,
+                Ok(Err(error)) => return Err(error),
+                Err(error) => {
+                    return Err(AppError::internal(format!(
+                        "role task failed during shutdown: {error}"
+                    )));
+                }
+            }
+        }
+        if role_tasks.is_empty() {
+            return Ok(true);
+        }
+
+        tokio::select! {
+            _ = &mut timeout => {
+                abort_role_tasks(role_tasks);
+                return Ok(false);
+            }
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+        }
+    }
+}
+
+fn role_idle_task(role: Role, mut shutdown_rx: watch::Receiver<bool>) -> JoinHandle<RoleResult> {
+    tokio::spawn(async move {
+        info!(role = role.as_str(), "role task started");
+        while !*shutdown_rx.borrow() {
+            if shutdown_rx.changed().await.is_err() {
+                break;
+            }
+        }
+        info!(role = role.as_str(), "role task stopped");
+        Ok(())
     })
 }
 
 fn valid_runtime_secret(value: &str) -> bool {
     value.len() >= 16 && value != "dev-secret-change-me" && value != "change-me"
-}
-
-fn role_idle_task(
-    role: Role,
-    enabled: bool,
-    shutdown_rx: watch::Receiver<bool>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    if !enabled {
-        return None;
-    }
-    Some(tokio::spawn(async move {
-        info!(role = role.as_str(), "role task started");
-        while !*shutdown_rx.borrow() {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-        info!(role = role.as_str(), "role task stopped");
-    }))
-}
-
-fn cancel_role_tasks(
-    worker: Option<tokio::task::JoinHandle<()>>,
-    scheduler: Option<tokio::task::JoinHandle<()>>,
-    maintenance: Option<tokio::task::JoinHandle<()>>,
-) {
-    if let Some(t) = worker {
-        t.abort();
-    }
-    if let Some(t) = scheduler {
-        t.abort();
-    }
-    if let Some(t) = maintenance {
-        t.abort();
-    }
-}
-
-async fn await_role_tasks(
-    worker: Option<tokio::task::JoinHandle<()>>,
-    scheduler: Option<tokio::task::JoinHandle<()>>,
-    maintenance: Option<tokio::task::JoinHandle<()>>,
-) {
-    if let Some(t) = worker {
-        let _ = t.await;
-    }
-    if let Some(t) = scheduler {
-        let _ = t.await;
-    }
-    if let Some(t) = maintenance {
-        let _ = t.await;
-    }
 }
 
 async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
