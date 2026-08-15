@@ -196,7 +196,7 @@ attempt ID, account pseudonym, operation, outcome, duration, error class.
 | --- | --- | --- | --- | --- |
 | S-01 (**I**) | Public bucket or directory listing | Private object store; no anonymous read; block public ACL/policies on S3 | Misconfigured MinIO | Object-store contract + operator checklist |
 | S-02 (**I**) | Backup tape holds expired originals | Retention job deletes objects by deadline; backup docs state encryption and retention | 30-day-old receipt in nightly dump | Retention integration: object removed, expense row remains |
-| S-03 (**T**) | User deletes original but hash reuse confuses dedupe | Content-hash duplicate absorption; soft duplicate warning only (never auto-delete user data) | Same receipt photo twice | Receipt seam: second submit flagged, not merged silently |
+| S-03 (**T**) | User deletes original but hash reuse confuses dedupe | Exact SHA-256 duplicates are absorbed into one logical receipt; soft or perceptual matches are warning-only and never merge data | Same bytes or a visually similar photo submitted twice | Receipt seam: exact bytes create no second expense; soft match only warns |
 | S-04 (**I**) | Presigned URL leaks receipt | No presigned URLs in MVP; serve via authenticated internal path only | Leaked URL in chat | Architecture rule; future feature needs threat review |
 | S-05 (**D**) | Disk fill from unreaped originals | Hourly/bounded retention sweep; configurable 1–30 days | Never-run sweeper | Maintenance job metrics |
 
@@ -242,25 +242,32 @@ These defaults are security-relevant and must match the product contract.
 
 ## Stable error-class mapping (security-relevant)
 
-Error classes are stable across CLI, logs, metrics, and provider adapters.
-Permanent classes must not be retried blindly; `transient` may backoff.
+Error classes are stable across CLI, logs, metrics, and provider adapters and
+match `docs/product-contracts.md`. Permanent classes must not be retried
+blindly; retryable classes use bounded backoff.
 
 | Error class | Permanent / retryable | Typical security / abuse scenarios | HTTP / ingress | Job retry | User-visible pattern |
 | --- | --- | --- | --- | --- | --- |
-| `forbidden` | Permanent | Webhook secret fail; allowlist deny; suspended account | `401` / no enqueue | No | Generic unauthorized or silent drop per policy |
+| `auth` | Permanent | Missing or wrong webhook/provider credential | `401` / no enqueue | No | Generic unauthorized response |
+| `forbidden` | Permanent | Allowlist deny; suspended account; ingress mode denial | `403` or accepted no-op per provider contract | No | Generic denial or silent drop per policy |
 | `validation` | Permanent | Bad webhook JSON; media URL/policy fail; oversize body; config | `400` / `413` | No | Short Vietnamese operator-safe text |
 | `consent_required` | Permanent | Pre-consent message | `200` ack + privacy reply path | No | Privacy template |
 | `quota_exceeded` | Permanent | Rate/quota caps | `200` ack + suppression | No | Quota notice |
 | `unsupported` | Permanent | Non-receipt image; unsupported event type | `200` ack or ignore | No | Explain unsupported input |
 | `not_found` | Permanent | Stale command target | N/A | No | Not found guidance |
 | `conflict` | Permanent | Optimistic version; outbound not in `sending` | N/A | No | Ask user to retry command |
-| `transient` | Retryable | DB timeout; provider 5xx/429; network | `500` if persist failed | Yes with backoff | "Try again" when appropriate |
+| `duplicate` | Permanent success | Replayed event, exact receipt hash, outbound key | `200` | No | Duplicate-specific reply only when useful |
+| `rate_limited` | Retryable | Local or provider throttle | `429` or accepted suppression | Yes with backoff | Quota or retry-later notice |
+| `timeout` | Retryable | Provider or dependency deadline | `500` if persistence affected | Yes with backoff | "Try again" when appropriate |
+| `provider_error` | Retryable | Provider 5xx or classified remote failure | N/A | Yes with backoff | Generic provider-unavailable text |
+| `provider_ambiguous` | Manual | Provider may have accepted an outbound send | N/A | No automatic retry | Operator reconciliation required |
+| `transient` | Retryable | Database or infrastructure flake | `500` if persist failed | Yes with backoff | "Try again" when appropriate |
 | `kill_switch` | Permanent | Feature disabled (extraction off) | N/A | No | Feature unavailable |
-| `internal` | Retryable with cap | Unexpected invariant break | `500` | Limited | Generic error; details only in logs |
+| `internal` | Permanent until fixed | Unexpected invariant break or defect | `500` | No blind retry | Generic error; details only in logs |
 
 **Webhook-specific mapping**
 
-- Secret failure → `forbidden` (log warn, no payload)
+- Secret failure → `auth` (log warn, no payload)
 - Parse/validation failure → `validation` (log `error_class` only)
 - Persist failure → `transient` or `internal` → `500` for provider retry
 - Duplicate event → success response, metric `duplicate_count++`, no new job
@@ -268,8 +275,12 @@ Permanent classes must not be retried blindly; `transient` may backoff.
 **Outbound-specific mapping**
 
 - Provider 4xx (except 429) → `validation` → `failed`
-- Provider 429/5xx/timeout → `transient` → retry job
-- Malformed success response after HTTP 2xx → `ambiguous` (manual reconciliation)
+- Provider 429 → `rate_limited`; provider 5xx → `provider_error`; transport
+  deadline → `timeout`; each may retry with bounded backoff before the send is
+  known to have reached the provider.
+- Malformed or indeterminate success after the request may have reached the
+  provider → `provider_ambiguous` and outbound state `ambiguous` (manual
+  reconciliation, never automatic resend).
 
 ## Security acceptance tests
 

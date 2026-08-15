@@ -90,22 +90,7 @@ _Avoid_: Insight, summary, report
 The audited progress of removing an account's domain data, pending jobs, object-store originals, and provider-side artifacts where supported. Active deletion blocks new receipt, schedule, and outbound work for that account.
 _Avoid_: Delete saga, account wipe, purge
 
-## Invariants
-
-**Inbound uniqueness**:
-At most one logical processing outcome per provider event identifier; duplicates are absorbed without duplicate domain effects.
-
-**Transactional side effects**:
-A domain transition and its required jobs and outbound intents commit together or neither persists.
-
-**At-least-once execution**:
-Jobs and outbound delivery may run more than once; effects must be idempotent or safely classified as terminal or ambiguous.
-
-**Lease authority**:
-Only the holder of a valid lease may complete or fail the corresponding job attempt; stale workers must abandon work.
-
-**Serialization by key**:
-Jobs sharing a serialization key for one account do not execute concurrently in ways that could reorder dependent effects.
+## Domain invariants
 
 **Ambiguous send discipline**:
 Ambiguous delivery never triggers an automatic resend; reconciliation or operator action is required.
@@ -118,6 +103,3 @@ Original receipt assets expire and may be deleted early; confirmed expenses and 
 
 **Deterministic insight floor**:
 Insight snapshots remain usable from deterministic aggregates when optional narrative generation is disabled or fails.
-
-**Ingress mode exclusivity**:
-Webhook ingress and polling fallback are mutually exclusive operational modes; only one mode owns ingestion at a time.

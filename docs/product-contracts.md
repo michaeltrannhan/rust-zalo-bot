@@ -218,6 +218,21 @@ signed 64-bit minor units + ISO 4217 currency. Instants: `timestamptz`; account
 local scheduling: IANA timezone identifier. Application-generated stable IDs;
 never expose sequential database IDs as provider idempotency keys.
 
+### System invariants
+
+- At most one logical processing outcome exists per provider event identifier;
+  duplicate ingress cannot create duplicate domain effects.
+- A domain transition and every required job or outbound intent commit in one
+  PostgreSQL transaction or none persists.
+- Jobs execute at least once; every external or domain effect is idempotent or
+  becomes an explicit terminal or ambiguous outcome.
+- Only the current lease holder may complete or fail a job attempt. A stale
+  worker that loses its lease cannot commit completion.
+- Jobs with the same serialization key cannot execute concurrently when their
+  effects could reorder account state.
+- Webhook and polling ingress are mutually exclusive; polling additionally
+  requires the current renewable leader lease.
+
 ### Phased table rollout
 
 | Phase | Tables / concepts | Milestone |
@@ -321,7 +336,7 @@ never expose sequential database IDs as provider idempotency keys.
 
 | Artifact | Owner milestone |
 | --- | --- |
-| Domain vocabulary and invariants | `CONTEXT.md` (M0 sibling) |
+| Domain vocabulary and domain invariants | `CONTEXT.md` (M0 sibling) |
 | Architecture ADR | ADR (M0 sibling) |
 | Threat model | `docs/threat-model.md` (M0 sibling) |
 | Legacy capability disposition | `docs/legacy-capabilities.md` |
