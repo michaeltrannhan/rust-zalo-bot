@@ -19,7 +19,14 @@ only when its exit proof is recorded here and the repository-level checks pass.
   - [x] Loopback-only development compose defaults and hardened systemd service
   - [x] Debian package and portable tarball preserve operator state on removal
   - [x] Real arm64 package installed, started, health-checked, stopped, removed, and purged on Debian 12 systemd
-- [ ] M2 — Text-command slice
+- [x] M2 — Text-command slice
+  - [x] Consent, fail-closed allowlist, help, privacy, manual entry, today, and recent-history behavior
+  - [x] Pending confirmation expires deterministically and resolves its stable draft reference
+  - [x] Verified, bounded webhook ingress persists before acknowledgement and rejects the inactive mode
+  - [x] Webhook and polling normalization share one transactional idempotency boundary
+  - [x] Replies enqueue transactionally and deliver through the real loopback-tested Zalo adapter
+  - [x] Sent, sending, and ambiguous outbound rows are never automatically resent
+  - [x] Correct-mode retry promotes a previously mode-rejected event without duplicating it
 - [ ] M3 — Durable work depth
 - [ ] M4 — Receipt-to-expense slice
 - [ ] M5 — Real extraction and object storage
@@ -42,6 +49,11 @@ before or immediately after integration.
 | M1 | `m1-packaging` | `8ac158a` | yes, full base diff | `8453904` | Debian, portable bundle, systemd, compose, and operator guide |
 | M1 | lead integration | `8879b57` | yes, post-merge review | `8879b57` | Hardened config/errors/shutdown/migration tests and reconciled package docs |
 | M1 | `m1-tests` | `7b800c6` | yes, full base diff | `40738ce` | Seven independent CLI/runtime acceptance checks; ordinary parallel runner also passed |
+| M2 | `m2-conversation` | `576b5e3` | yes, full base diff | `8f1b14f` | Pure Vietnamese text-command seam; lead corrected consent/pending edge cases in `cc87d7e` and `d89f59a` |
+| M2 | `m2-provider` | `7e822a5` | yes, full base diff | `67095d5` | Zalo wire adapter; lead closed redaction, token encoding, parsing, and input-bound gaps in `ac534d8` and `d89f59a` |
+| M2 | `m2-ingress` | `642fca0` | yes, full base diff | `62c9cbd` | Transactional ingress persistence; lead corrected constraints, mode promotion, clocks, and draft lookup in `a62d964` and `d89f59a` |
+| M2 | `m2-acceptance` | `6161716` | yes, full base diff | `24100c3` | Four independent public-seam acceptance tests; lead strengthened rejected-event recovery coverage |
+| M2 | lead integration | `9a003f5`, `d89f59a` | yes, skeptical post-merge review | same | Wired HTTP/runtime/outbound vertical slice and fixed every confirmed M2-blocking review finding |
 
 ## Validation ledger
 
@@ -56,6 +68,10 @@ before or immediately after integration.
 | M1 | Real Linux arm64 release build | pass | Rust 1.94 Debian build; binary and embedded migration installed from the generated package |
 | M1 | Debian 12 systemd lifecycle | pass | Real package migrated, served live/ready, stopped in 552 ms, preserved state on remove, removed it on purge |
 | M1 | arm64 artifact checksums | pass | deb `4a9d2809…bc2d3`; tarball `d727fb81…d3c5b` |
+| M2 | `TEST_DATABASE_URL=… cargo test --all-targets --all-features` | pass | 83 tests with real PostgreSQL under the ordinary parallel runner; includes duplicate cross-ingress delivery, mode-rejected recovery, pending-window regression, and conservative outbound states |
+| M2 | `cargo clippy --all-targets --all-features -- -D warnings` | pass | No warnings |
+| M2 | `cargo fmt --all -- --check` and `git diff --check` | pass | Formatting and whitespace clean |
+| M2 | Loopback Zalo HTTP contract and vertical webhook delivery | pass | Real adapter authenticates/parses/sends with no real external network and one idempotent reply |
 
 ## Environment-limited release gates
 
