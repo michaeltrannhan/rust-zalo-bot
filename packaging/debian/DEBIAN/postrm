@@ -1,0 +1,58 @@
+#!/bin/sh
+set -e
+
+SERVICE_NAME=zl-expense
+SERVICE_USER=zl-expense
+SERVICE_GROUP=zl-expense
+CONFIG_DIR=/etc/zl-expense
+STATE_DIR=/var/lib/zl-expense
+
+systemd_purge_unit() {
+    if [ ! -d /run/systemd/system ]; then
+        return 0
+    fi
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if command -v deb-systemd-helper >/dev/null 2>&1; then
+        deb-systemd-helper purge "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+        deb-systemd-helper unmask "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+    fi
+
+    systemctl daemon-reload || true
+}
+
+remove_account() {
+    if getent passwd "${SERVICE_USER}" >/dev/null 2>&1; then
+        if command -v deluser >/dev/null 2>&1; then
+            deluser --system "${SERVICE_USER}" >/dev/null 2>&1 || true
+        else
+            userdel "${SERVICE_USER}" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if getent group "${SERVICE_GROUP}" >/dev/null 2>&1; then
+        if command -v delgroup >/dev/null 2>&1; then
+            delgroup --system "${SERVICE_GROUP}" >/dev/null 2>&1 || true
+        else
+            groupdel "${SERVICE_GROUP}" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+case "${1:-}" in
+remove|upgrade|failed-upgrade|abort-upgrade|abort-install|abort-remove)
+    systemd_purge_unit
+    ;;
+purge)
+    systemd_purge_unit
+    rm -rf "${CONFIG_DIR}"
+    rm -rf "${STATE_DIR}"
+    remove_account
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0

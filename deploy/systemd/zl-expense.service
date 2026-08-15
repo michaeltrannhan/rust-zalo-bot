@@ -1,0 +1,50 @@
+[Unit]
+Description=ZL Expense Bot
+Documentation=file:/usr/share/doc/zl-expense/operator-install.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Milestone 1: Type=simple until the runtime implements sd_notify readiness (Milestone 7).
+# Upgrade path: Type=notify, NotifyAccess=main, WatchdogSec aligned with app heartbeat.
+Type=simple
+User=zl-expense
+Group=zl-expense
+ExecStart=/usr/bin/zl-expense run
+EnvironmentFile=-/etc/zl-expense/environment
+
+StateDirectory=zl-expense
+RuntimeDirectory=zl-expense
+StateDirectoryMode=0750
+RuntimeDirectoryMode=0750
+
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zl-expense
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+UMask=0077
+
+ReadWritePaths=/var/lib/zl-expense /run/zl-expense
+
+[Install]
+WantedBy=multi-user.target

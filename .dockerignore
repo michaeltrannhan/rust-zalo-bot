@@ -1,0 +1,7 @@
+.git
+.agents
+.cursor
+dist
+target
+**/*.deb
+**/*.tar.gz

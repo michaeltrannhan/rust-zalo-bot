@@ -1,0 +1,9 @@
+Package: zl-expense
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: @ARCH@
+Maintainer: ZL Expense Bot <operators@localhost>
+Description: Zalo expense bot (unsigned development package)
+ Self-hosted Zalo expense assistant. Unsigned Milestone 1 development
+ build for local validation; not for production distribution.

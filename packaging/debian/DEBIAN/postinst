@@ -1,0 +1,80 @@
+#!/bin/sh
+set -e
+
+SERVICE_NAME=zl-expense
+SERVICE_USER=zl-expense
+SERVICE_GROUP=zl-expense
+CONFIG_DIR=/etc/zl-expense
+CREDENTIALS_DIR=/etc/zl-expense/credentials
+CONFIG_FILE=/etc/zl-expense/config.toml
+CONFIG_EXAMPLE=/usr/share/zl-expense/config.example.toml
+
+ensure_group() {
+    if ! getent group "${SERVICE_GROUP}" >/dev/null 2>&1; then
+        if command -v addgroup >/dev/null 2>&1; then
+            addgroup --system "${SERVICE_GROUP}"
+        else
+            groupadd -r "${SERVICE_GROUP}"
+        fi
+    fi
+}
+
+ensure_user() {
+    if ! getent passwd "${SERVICE_USER}" >/dev/null 2>&1; then
+        if command -v adduser >/dev/null 2>&1; then
+            adduser --system \
+                --home /var/lib/zl-expense \
+                --no-create-home \
+                --ingroup "${SERVICE_GROUP}" \
+                --shell /usr/sbin/nologin \
+                "${SERVICE_USER}"
+        else
+            useradd -r \
+                -g "${SERVICE_GROUP}" \
+                -d /var/lib/zl-expense \
+                -s /usr/sbin/nologin \
+                "${SERVICE_USER}"
+        fi
+    fi
+}
+
+configure_paths() {
+    install -d -m 0755 -o root -g root "${CONFIG_DIR}"
+    install -d -m 0750 -o root -g "${SERVICE_GROUP}" "${CREDENTIALS_DIR}"
+
+    if [ ! -f "${CONFIG_FILE}" ] && [ -f "${CONFIG_EXAMPLE}" ]; then
+        install -m 0644 -o root -g root "${CONFIG_EXAMPLE}" "${CONFIG_FILE}"
+    fi
+}
+
+systemd_refresh() {
+    if [ ! -d /run/systemd/system ]; then
+        return 0
+    fi
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 0
+    fi
+
+    systemctl daemon-reload || true
+
+    if command -v deb-systemd-helper >/dev/null 2>&1; then
+        deb-systemd-helper update-state "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+        deb-systemd-helper enable "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+    fi
+}
+
+case "${1:-}" in
+configure)
+    ensure_group
+    install -d -m 0755 /var/lib/zl-expense
+    ensure_user
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" /var/lib/zl-expense
+    chmod 0750 /var/lib/zl-expense
+    configure_paths
+    systemd_refresh
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0
