@@ -13,7 +13,7 @@ use crate::provider::{
 };
 use crate::receipt::{
     ExtractOutcome, IngestOutcome, JOB_TYPE_EXTRACT, JOB_TYPE_INGEST, ReceiptJobPayload,
-    ReceiptLifecycle, ingest_dedupe_key,
+    ReceiptLifecycle, extract_dedupe_key, ingest_dedupe_key,
 };
 use crate::work::ClaimedJob;
 
@@ -150,6 +150,9 @@ async fn dispatch_receipt_extract<R: MediaHostResolver>(
         Ok(submission_id) => submission_id,
         Err(execution) => return execution,
     };
+    if job.dedupe_key != extract_dedupe_key(submission_id) {
+        return OutboundJobExecution::InvalidJob;
+    }
 
     let account_id = match load_submission_account_id(&deps.pool, submission_id).await {
         Some(account_id) => account_id,

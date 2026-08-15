@@ -5,7 +5,9 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::conversation::{format_date_vn, format_minor, transaction_type_label};
+use crate::conversation::{
+    format_date_vn, format_minor, manual_confirmation_card, transaction_type_label,
+};
 use crate::receipt::ReceiptLifecycle;
 use crate::work::{EnqueueRequest, WorkStore};
 
@@ -103,13 +105,12 @@ fn review_idempotency_key(submission_id: Uuid) -> String {
 }
 
 fn review_card_body(context: &FollowupContext) -> String {
-    let amount = format_minor(context.amount_minor, &context.currency);
-    let date = format_date_vn(context.occurred_at, &context.timezone);
-    let type_label = transaction_type_label(&context.transaction_type);
-    format!(
-        "Tôi đọc được:\n\nCửa hàng: {merchant}\nSố tiền: {amount}\nNgày: {date}\nLoại: {type_label}\nDanh mục: {category}\n\nTrả lời: ok / y để lưu · edit / fix để sửa số tiền · no / n để hủy",
-        merchant = context.merchant,
-        category = context.category_display,
+    manual_confirmation_card(
+        &context.merchant,
+        &format_minor(context.amount_minor, &context.currency),
+        &format_date_vn(context.occurred_at, &context.timezone),
+        transaction_type_label(&context.transaction_type),
+        &context.category_display,
     )
 }
 
