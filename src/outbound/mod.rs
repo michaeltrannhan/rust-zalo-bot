@@ -154,7 +154,9 @@ pub async fn deliver_for_job(
             if !job_lease_current(pool, job.id, job.lease_token).await? {
                 return Ok(OutboundJobExecution::StaleLease);
             }
-            mark_ambiguous_under_lease(pool, job.id, job.lease_token, outbound_id).await?;
+            if !mark_ambiguous_under_lease(pool, job.id, job.lease_token, outbound_id).await? {
+                return Ok(OutboundJobExecution::StaleLease);
+            }
             return Ok(OutboundJobExecution::Complete(DeliveryResult {
                 outbound_id,
                 state: DeliveryState::Ambiguous,
@@ -199,7 +201,7 @@ pub async fn deliver_for_job(
         Ok(sent) => {
             let provider_message_id =
                 (!sent.provider_message_id.is_empty()).then_some(sent.provider_message_id);
-            update_delivery_under_lease(
+            let updated = update_delivery_under_lease(
                 pool,
                 job.id,
                 job.lease_token,
@@ -209,6 +211,9 @@ pub async fn deliver_for_job(
                 None,
             )
             .await?;
+            if !updated {
+                return Ok(OutboundJobExecution::StaleLease);
+            }
             Ok(OutboundJobExecution::Complete(DeliveryResult {
                 outbound_id,
                 state: DeliveryState::Sent,
@@ -220,7 +225,7 @@ pub async fn deliver_for_job(
             } else {
                 DeliveryState::Failed
             };
-            update_delivery_under_lease(
+            let updated = update_delivery_under_lease(
                 pool,
                 job.id,
                 job.lease_token,
@@ -230,6 +235,9 @@ pub async fn deliver_for_job(
                 Some(error.class.as_str()),
             )
             .await?;
+            if !updated {
+                return Ok(OutboundJobExecution::StaleLease);
+            }
             if state == DeliveryState::Ambiguous {
                 Ok(OutboundJobExecution::Complete(DeliveryResult {
                     outbound_id,
@@ -319,12 +327,15 @@ async fn mark_ambiguous_under_lease(
     job_id: Uuid,
     lease_token: Uuid,
     outbound_id: Uuid,
-) -> Result<(), OutboundStoreError> {
+) -> Result<bool, OutboundStoreError> {
     let updated = sqlx::query(
         r#"
         UPDATE outbound_messages
         SET state = 'ambiguous',
             last_error_class = $4,
+            ambiguity_metadata = jsonb_build_object(
+                'reason', 'recovered_after_unfinished_send'
+            ),
             updated_at = NOW()
         WHERE id = $1
           AND state = 'sending'
@@ -345,10 +356,7 @@ async fn mark_ambiguous_under_lease(
     .execute(pool)
     .await
     .map_err(|_| OutboundStoreError)?;
-    if updated.rows_affected() != 1 {
-        return Err(OutboundStoreError);
-    }
-    Ok(())
+    Ok(updated.rows_affected() == 1)
 }
 
 async fn update_delivery(
@@ -389,7 +397,7 @@ async fn update_delivery_under_lease(
     state: DeliveryState,
     provider_message_id: Option<&str>,
     error_class: Option<&str>,
-) -> Result<(), OutboundStoreError> {
+) -> Result<bool, OutboundStoreError> {
     let updated = sqlx::query(
         r#"
         UPDATE outbound_messages
@@ -418,8 +426,5 @@ async fn update_delivery_under_lease(
     .execute(pool)
     .await
     .map_err(|_| OutboundStoreError)?;
-    if updated.rows_affected() != 1 {
-        return Err(OutboundStoreError);
-    }
-    Ok(())
+    Ok(updated.rows_affected() == 1)
 }
