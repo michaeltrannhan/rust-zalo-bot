@@ -16,7 +16,18 @@ pub struct Config {
     #[serde(default)]
     pub credentials: CredentialsConfig,
     #[serde(default)]
+    pub access: AccessConfig,
+    #[serde(default)]
     pub zalo: ZaloConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AccessConfig {
+    /// Provider-issued sender identifiers permitted to create or use accounts.
+    /// An empty list deliberately denies every sender.
+    #[serde(default)]
+    pub allowed_provider_sender_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +146,12 @@ pub struct ZaloConfig {
     pub bot_token_credential: String,
     #[serde(default = "default_webhook_secret_credential")]
     pub webhook_secret_credential: String,
+    #[serde(default = "default_api_base")]
+    pub api_base: String,
+    #[serde(default = "default_send_timeout_seconds")]
+    pub send_timeout_seconds: u64,
+    #[serde(default = "default_webhook_max_body_bytes")]
+    pub webhook_max_body_bytes: usize,
 }
 
 fn default_bot_token_credential() -> String {
@@ -145,11 +162,26 @@ fn default_webhook_secret_credential() -> String {
     "webhook-secret".to_string()
 }
 
+fn default_api_base() -> String {
+    "https://bot-api.zaloplatforms.com".to_string()
+}
+
+fn default_send_timeout_seconds() -> u64 {
+    10
+}
+
+fn default_webhook_max_body_bytes() -> usize {
+    1_048_576
+}
+
 impl Default for ZaloConfig {
     fn default() -> Self {
         Self {
             bot_token_credential: default_bot_token_credential(),
             webhook_secret_credential: default_webhook_secret_credential(),
+            api_base: default_api_base(),
+            send_timeout_seconds: default_send_timeout_seconds(),
+            webhook_max_body_bytes: default_webhook_max_body_bytes(),
         }
     }
 }

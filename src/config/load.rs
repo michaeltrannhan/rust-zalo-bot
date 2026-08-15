@@ -1,6 +1,6 @@
 //! Configuration loading with env overrides and source attribution.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,8 +39,12 @@ pub struct ResolvedConfig {
     pub outbound_delivery: u32,
     pub original_receipt_days: u32,
     pub credentials_directory: PathBuf,
+    pub allowed_provider_sender_ids: BTreeSet<String>,
     pub bot_token_credential: String,
     pub webhook_secret_credential: String,
+    pub zalo_api_base: String,
+    pub zalo_send_timeout_seconds: u64,
+    pub webhook_max_body_bytes: usize,
     pub attribution: BTreeMap<String, ResolvedValue>,
 }
 
@@ -53,6 +57,29 @@ impl ResolvedConfig {
             .map(|(k, v)| (k.as_str(), v))
             .collect();
         serde_json::to_string_pretty(&map).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    pub fn is_provider_sender_allowed(&self, provider_sender_id: &str) -> bool {
+        self.allowed_provider_sender_ids
+            .contains(provider_sender_id)
+    }
+
+    pub fn read_zalo_bot_token(&self) -> Result<String, AppError> {
+        self.read_credential(&self.bot_token_credential)
+    }
+
+    pub fn read_webhook_secret(&self) -> Result<String, AppError> {
+        self.read_credential(&self.webhook_secret_credential)
+    }
+
+    fn read_credential(&self, reference: &str) -> Result<String, AppError> {
+        let value = fs::read_to_string(self.credentials_directory.join(reference))
+            .map_err(|_| AppError::config("required credential is unavailable"))?;
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(AppError::config("required credential is unavailable"));
+        }
+        Ok(value.to_string())
     }
 }
 
@@ -90,8 +117,17 @@ pub fn load_config(config_path: Option<&Path>) -> Result<ResolvedConfig, AppErro
         outbound_delivery: cfg.concurrency.outbound_delivery,
         original_receipt_days: cfg.retention.original_receipt_days,
         credentials_directory: credentials_dir,
+        allowed_provider_sender_ids: cfg
+            .access
+            .allowed_provider_sender_ids
+            .iter()
+            .cloned()
+            .collect(),
         bot_token_credential: cfg.zalo.bot_token_credential.clone(),
         webhook_secret_credential: cfg.zalo.webhook_secret_credential.clone(),
+        zalo_api_base: cfg.zalo.api_base.trim_end_matches('/').to_string(),
+        zalo_send_timeout_seconds: cfg.zalo.send_timeout_seconds,
+        webhook_max_body_bytes: cfg.zalo.webhook_max_body_bytes,
         attribution,
     };
 
@@ -104,6 +140,7 @@ fn merge_config(target: &mut Config, source: &Config) {
     target.concurrency = source.concurrency.clone();
     target.retention = source.retention.clone();
     target.credentials = source.credentials.clone();
+    target.access = source.access.clone();
     target.zalo = source.zalo.clone();
 }
 
@@ -151,6 +188,11 @@ fn record_default_sources(attribution: &mut BTreeMap<String, ResolvedValue>) {
         defaults.credentials.directory,
         ConfigSource::Default,
     );
+    insert_allowlist_attr(
+        attribution,
+        &defaults.access.allowed_provider_sender_ids,
+        ConfigSource::Default,
+    );
     insert_attr(
         attribution,
         "zalo.bot_token_credential",
@@ -161,6 +203,24 @@ fn record_default_sources(attribution: &mut BTreeMap<String, ResolvedValue>) {
         attribution,
         "zalo.webhook_secret_credential",
         defaults.zalo.webhook_secret_credential,
+        ConfigSource::Default,
+    );
+    insert_attr(
+        attribution,
+        "zalo.api_base",
+        defaults.zalo.api_base,
+        ConfigSource::Default,
+    );
+    insert_attr(
+        attribution,
+        "zalo.send_timeout_seconds",
+        defaults.zalo.send_timeout_seconds,
+        ConfigSource::Default,
+    );
+    insert_attr(
+        attribution,
+        "zalo.webhook_max_body_bytes",
+        defaults.zalo.webhook_max_body_bytes,
         ConfigSource::Default,
     );
 }
@@ -218,6 +278,17 @@ fn record_file_sources(
         "directory",
         cfg.credentials.directory.clone()
     );
+    if document
+        .get("access")
+        .and_then(|section| section.get("allowed_provider_sender_ids"))
+        .is_some()
+    {
+        insert_allowlist_attr(
+            attribution,
+            &cfg.access.allowed_provider_sender_ids,
+            ConfigSource::File,
+        );
+    }
     record!(
         "zalo",
         "bot_token_credential",
@@ -227,6 +298,17 @@ fn record_file_sources(
         "zalo",
         "webhook_secret_credential",
         cfg.zalo.webhook_secret_credential.clone()
+    );
+    record!("zalo", "api_base", cfg.zalo.api_base.clone());
+    record!(
+        "zalo",
+        "send_timeout_seconds",
+        cfg.zalo.send_timeout_seconds
+    );
+    record!(
+        "zalo",
+        "webhook_max_body_bytes",
+        cfg.zalo.webhook_max_body_bytes
     );
 }
 
@@ -300,6 +382,28 @@ fn apply_env_overrides(
             ConfigSource::Env,
         );
     }
+    if let Ok(v) = env::var("ZL_EXPENSE_ALLOWED_PROVIDER_SENDER_IDS") {
+        cfg.access.allowed_provider_sender_ids = v
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        insert_allowlist_attr(
+            attribution,
+            &cfg.access.allowed_provider_sender_ids,
+            ConfigSource::Env,
+        );
+    }
+    if let Ok(v) = env::var("ZL_EXPENSE_ZALO_API_BASE") {
+        cfg.zalo.api_base = v;
+        insert_attr(
+            attribution,
+            "zalo.api_base",
+            cfg.zalo.api_base.clone(),
+            ConfigSource::Env,
+        );
+    }
     Ok(())
 }
 
@@ -321,6 +425,19 @@ fn insert_attr<T: Serialize>(
             value: serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
             source,
         },
+    );
+}
+
+fn insert_allowlist_attr(
+    attribution: &mut BTreeMap<String, ResolvedValue>,
+    values: &[String],
+    source: ConfigSource,
+) {
+    insert_attr(
+        attribution,
+        "access.allowed_provider_sender_ids",
+        serde_json::json!({ "count": values.len() }),
+        source,
     );
 }
 
@@ -372,6 +489,58 @@ fn validate_resolved(cfg: &Config) -> Result<(), AppError> {
     }
     if cfg.credentials.directory.trim().is_empty() {
         return Err(AppError::config("credentials.directory must not be empty"));
+    }
+    if cfg
+        .access
+        .allowed_provider_sender_ids
+        .iter()
+        .any(|value| !valid_provider_sender_id(value))
+    {
+        return Err(AppError::config(
+            "access.allowed_provider_sender_ids contains an invalid identifier",
+        ));
+    }
+    validate_zalo_api_base(&cfg.zalo.api_base)?;
+    if cfg.zalo.send_timeout_seconds == 0 || cfg.zalo.send_timeout_seconds > 60 {
+        return Err(AppError::config(
+            "zalo.send_timeout_seconds must be between 1 and 60",
+        ));
+    }
+    if cfg.zalo.webhook_max_body_bytes == 0 || cfg.zalo.webhook_max_body_bytes > 1_048_576 {
+        return Err(AppError::config(
+            "zalo.webhook_max_body_bytes must be between 1 and 1048576",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_provider_sender_id(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 128
+        && trimmed == value
+        && !trimmed.chars().any(char::is_control)
+}
+
+fn validate_zalo_api_base(value: &str) -> Result<(), AppError> {
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| AppError::config("zalo.api_base must be a valid URL"))?;
+    let is_https = url.scheme() == "https";
+    let is_loopback_http = url.scheme() == "http"
+        && url
+            .host_str()
+            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|ip| ip.is_loopback());
+    if (!is_https && !is_loopback_http)
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(AppError::config(
+            "zalo.api_base must use HTTPS (HTTP is allowed only for a loopback IP)",
+        ));
     }
     Ok(())
 }

@@ -166,3 +166,85 @@ fn invalid_toml_error_does_not_echo_values() {
     assert_eq!(err.message, "invalid config TOML");
     assert!(!err.message.contains("do-not-echo-this"));
 }
+
+#[test]
+fn access_allowlist_defaults_to_deny_all() {
+    let _guard = env_test_lock();
+    unsafe {
+        std::env::set_var("ZL_EXPENSE_DATABASE_URL", "postgres://localhost/test");
+        std::env::remove_var("ZL_EXPENSE_ALLOWED_PROVIDER_SENDER_IDS");
+    }
+
+    let resolved = load_config(None).expect("load defaults");
+    assert!(resolved.allowed_provider_sender_ids.is_empty());
+    assert!(!resolved.is_provider_sender_allowed("family-member-1"));
+
+    unsafe {
+        std::env::remove_var("ZL_EXPENSE_DATABASE_URL");
+    }
+}
+
+#[test]
+fn config_show_reports_allowlist_count_without_identifiers() {
+    let _guard = env_test_lock();
+    unsafe {
+        std::env::set_var("ZL_EXPENSE_DATABASE_URL", "postgres://localhost/test");
+        std::env::remove_var("ZL_EXPENSE_ALLOWED_PROVIDER_SENDER_IDS");
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[access]
+allowed_provider_sender_ids = ["private-sender-123", "private-sender-456"]
+"#,
+    )
+    .expect("config");
+
+    let resolved = load_config(Some(&config_path)).expect("load");
+    assert!(resolved.is_provider_sender_allowed("private-sender-123"));
+    assert!(!resolved.is_provider_sender_allowed("different-sender"));
+    let shown = resolved.show_json();
+    assert!(!shown.contains("private-sender-123"));
+    assert!(!shown.contains("private-sender-456"));
+    assert!(shown.contains("\"count\": 2"));
+
+    unsafe {
+        std::env::remove_var("ZL_EXPENSE_DATABASE_URL");
+    }
+}
+
+#[test]
+fn credential_reader_returns_value_without_exposing_it_on_failure() {
+    let _guard = env_test_lock();
+    unsafe {
+        std::env::remove_var("TEST_DATABASE_URL");
+        std::env::remove_var("ZL_EXPENSE_DATABASE_URL");
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cred_dir = dir.path().join("credentials");
+    std::fs::create_dir_all(&cred_dir).expect("cred dir");
+    std::fs::write(cred_dir.join("database"), "postgres://localhost/test").expect("database");
+    std::fs::write(cred_dir.join("zalo-bot"), "secret-bot-token\n").expect("token");
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!("[credentials]\ndirectory = \"{}\"\n", cred_dir.display()),
+    )
+    .expect("config");
+
+    let resolved = load_config(Some(&config_path)).expect("load");
+    assert_eq!(
+        resolved.read_zalo_bot_token().expect("token"),
+        "secret-bot-token"
+    );
+    let err = resolved.read_webhook_secret().expect_err("missing secret");
+    assert_eq!(err.message, "required credential is unavailable");
+    assert!(
+        !err.to_json_line()
+            .contains(cred_dir.to_str().expect("path"))
+    );
+}
