@@ -18,6 +18,12 @@ pub fn welcome_text() -> String {
     "Cảm ơn bạn! Từ giờ bạn có thể:\n\n• Gửi ảnh hóa đơn để tôi đọc và ghi nhận.\n• Nhập nhanh: \"an sang 500k\", \"cafe 45k\".\n• Xem tổng hợp: /today, /week, /month.\n• Xem múi giờ, tiền tệ và lịch tổng kết bằng /settings.\n\nGõ /help để xem tất cả lệnh.".to_string()
 }
 
+pub fn privacy_text(retention_days: u32) -> String {
+    format!(
+        "Cách tôi dùng dữ liệu của bạn:\n\n• Ảnh hóa đơn chỉ dùng để đọc thông tin giao dịch; ảnh gốc được xóa sau {retention_days} ngày.\n• Giao dịch đã ghi nhận được lưu để tổng hợp báo cáo chi tiêu cho riêng bạn.\n\nGửi /export để tải về toàn bộ dữ liệu, /delete để xóa vĩnh viễn."
+    )
+}
+
 pub fn help_text() -> String {
     "Tôi có thể giúp bạn:\n\n• Gửi ảnh hóa đơn — tôi đọc và gợi ý để bạn xác nhận.\n• Nhập nhanh một khoản: \"an sang 500k\", \"cafe 45k\", \"150k cafe\".\n\nLệnh:\n/help — xem hướng dẫn này\n/today — chi tiêu hôm nay\n/week — chi tiêu tuần này\n/month — chi tiêu tháng này\n/recent — các khoản gần đây\n/settings — múi giờ, tiền tệ\n/tz — đổi múi giờ, ví dụ /tz Asia/Ho_Chi_Minh\n/sched — tổng kết tự động\n/export — tải dữ liệu về\n/delete — xóa toàn bộ dữ liệu (cần ok lần nữa)\n/privacy — cách dữ liệu được sử dụng\n\nok / y — xác nhận · no / n — bỏ qua · edit — sửa số tiền\nCâu tiếng Việt cũ (/homnay, xác nhận, …) vẫn dùng được.".to_string()
 }

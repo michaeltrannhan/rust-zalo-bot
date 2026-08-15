@@ -8,6 +8,7 @@ pub enum IntentKind {
     Confirm,
     Discard,
     Help,
+    Privacy,
     Today,
     Recent,
     ManualEntry,
@@ -37,9 +38,10 @@ pub fn parse_intent(text: &str, default_currency: &str) -> Intent {
         return Intent::none();
     }
 
-    if matches!(f.as_str(), "help" | "today" | "recent") {
+    if matches!(f.as_str(), "help" | "privacy" | "today" | "recent") {
         return Intent::of(match f.as_str() {
             "help" => IntentKind::Help,
+            "privacy" => IntentKind::Privacy,
             "today" => IntentKind::Today,
             _ => IntentKind::Recent,
         });
@@ -72,7 +74,11 @@ pub fn parse_intent(text: &str, default_currency: &str) -> Intent {
 pub fn is_explicit_slash_command(kind: IntentKind) -> bool {
     matches!(
         kind,
-        IntentKind::Start | IntentKind::Help | IntentKind::Today | IntentKind::Recent
+        IntentKind::Start
+            | IntentKind::Help
+            | IntentKind::Today
+            | IntentKind::Recent
+            | IntentKind::Privacy
     )
 }
 
@@ -179,12 +185,14 @@ impl Intent {
     }
 }
 
-const SLASH_COMMANDS: [(&str, IntentKind); 14] = [
+const SLASH_COMMANDS: [(&str, IntentKind); 16] = [
     ("start", IntentKind::Start),
     ("batdau", IntentKind::Start),
     ("xinchao", IntentKind::Start),
     ("help", IntentKind::Help),
     ("trogiup", IntentKind::Help),
+    ("privacy", IntentKind::Privacy),
+    ("consent", IntentKind::Privacy),
     ("today", IntentKind::Today),
     ("homnay", IntentKind::Today),
     ("recent", IntentKind::Recent),

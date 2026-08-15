@@ -10,13 +10,13 @@ pub fn currency_decimal_places(currency: &str) -> u32 {
 pub fn format_minor(amount: i64, currency: &str) -> String {
     let cur = currency.to_uppercase();
     let neg = amount < 0;
-    let value = if neg { -amount } else { amount };
+    let value = amount.unsigned_abs();
     let places = currency_decimal_places(&cur);
 
     let (int_part, frac_part) = if places == 0 {
         (format!("{value}"), String::new())
     } else {
-        let scale = 10_i64.pow(places);
+        let scale = 10_u64.pow(places);
         let int = value / scale;
         let frac = value % scale;
         (

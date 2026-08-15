@@ -11,11 +11,12 @@ use zl_expense::conversation::{
 
 fn active_ctx(account_id: Uuid) -> AccountContext {
     AccountContext {
-        account_id,
+        next_expense_id: account_id,
         lifecycle: LifecycleState::Active,
         allowlisted: true,
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
+        original_receipt_retention_days: 7,
         pending: None,
         today_summary: None,
         recent_lines: vec![],
@@ -24,11 +25,12 @@ fn active_ctx(account_id: Uuid) -> AccountContext {
 
 fn pending_consent_ctx(account_id: Uuid) -> AccountContext {
     AccountContext {
-        account_id,
+        next_expense_id: account_id,
         lifecycle: LifecycleState::PendingConsent,
         allowlisted: true,
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
+        original_receipt_retention_days: 7,
         pending: None,
         today_summary: None,
         recent_lines: vec![],
@@ -63,11 +65,12 @@ fn first_reply(outcome: &ConversationOutcome) -> &str {
 #[test]
 fn allowlist_denial_is_deterministic() {
     let ctx = AccountContext {
-        account_id: Uuid::new_v4(),
+        next_expense_id: Uuid::new_v4(),
         lifecycle: LifecycleState::Active,
         allowlisted: false,
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
+        original_receipt_retention_days: 7,
         pending: None,
         today_summary: None,
         recent_lines: vec![],
@@ -89,16 +92,19 @@ fn pending_consent_first_contact_shows_consent_card() {
 }
 
 #[test]
-fn pending_consent_start_records_consent() {
+fn pending_consent_start_shows_consent_without_recording_it() {
     let ctx = pending_consent_ctx(Uuid::new_v4());
     let outcome = decide(&ctx, "/start", Utc::now());
-    assert!(first_reply(&outcome).starts_with("Cảm ơn bạn!"));
-    assert_eq!(
-        outcome.commands,
-        vec![DomainCommand::GrantConsent {
-            consent_version: CONSENT_VERSION.to_string(),
-        }]
-    );
+    assert!(first_reply(&outcome).starts_with("Xin chào!"));
+    assert!(outcome.commands.is_empty());
+}
+
+#[test]
+fn privacy_is_available_before_consent() {
+    let ctx = pending_consent_ctx(Uuid::new_v4());
+    let outcome = decide(&ctx, "/privacy", Utc::now());
+    assert!(first_reply(&outcome).contains("ảnh gốc được xóa sau 7 ngày"));
+    assert!(outcome.commands.is_empty());
 }
 
 #[test]
@@ -136,11 +142,12 @@ fn unknown_input_returns_unknown_text() {
 #[test]
 fn slash_today_aliases_are_diacritics_insensitive() {
     let ctx = AccountContext {
-        account_id: Uuid::new_v4(),
+        next_expense_id: Uuid::new_v4(),
         lifecycle: LifecycleState::Active,
         allowlisted: true,
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
+        original_receipt_retention_days: 7,
         pending: None,
         today_summary: Some(PeriodSummary {
             label: "Hôm nay".to_string(),
@@ -162,11 +169,12 @@ fn slash_today_aliases_are_diacritics_insensitive() {
 #[test]
 fn slash_recent_and_history_aliases_match() {
     let ctx = AccountContext {
-        account_id: Uuid::new_v4(),
+        next_expense_id: Uuid::new_v4(),
         lifecycle: LifecycleState::Active,
         allowlisted: true,
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
+        original_receipt_retention_days: 7,
         pending: None,
         today_summary: None,
         recent_lines: vec![RecentExpenseLine {
@@ -260,6 +268,20 @@ fn manual_entry_arms_pending_with_fifteen_minute_expiry() {
 }
 
 #[test]
+fn manual_entry_uses_injected_id_deterministically() {
+    let expense_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa").unwrap();
+    let ctx = active_ctx(expense_id);
+    let now = Utc.with_ymd_and_hms(2026, 8, 15, 9, 0, 0).unwrap();
+    let first = decide(&ctx, "cafe 45k", now);
+    let second = decide(&ctx, "cafe 45k", now);
+    assert_eq!(first.commands, second.commands);
+    assert!(matches!(
+        first.commands.as_slice(),
+        [DomainCommand::CreateManualAwaitingConfirmation { expense_id: id, .. }] if *id == expense_id
+    ));
+}
+
+#[test]
 fn pending_ok_confirms_and_no_rejects() {
     let expense_id = Uuid::new_v4();
     let now = Utc.with_ymd_and_hms(2026, 8, 15, 9, 5, 0).unwrap();
@@ -350,4 +372,30 @@ fn explicit_slash_command_bypasses_pending_resolution() {
     let outcome = decide(&ctx, "/today", now);
     assert!(first_reply(&outcome).contains("100.000 ₫"));
     assert!(outcome.commands.is_empty());
+}
+
+#[test]
+fn bare_command_does_not_bypass_pending_resolution() {
+    let expense_id = Uuid::new_v4();
+    let now = Utc.with_ymd_and_hms(2026, 8, 15, 9, 0, 0).unwrap();
+    let mut ctx = active_ctx(Uuid::new_v4());
+    ctx.pending = Some(sample_pending(expense_id, 1, now));
+    ctx.today_summary = Some(PeriodSummary {
+        label: "Hôm nay".to_string(),
+        currency: "VND".to_string(),
+        total_minor: 100000,
+        tx_count: 1,
+    });
+
+    let outcome = decide(&ctx, "today", now);
+    assert!(first_reply(&outcome).starts_with("Tôi đọc được:"));
+    assert!(outcome.commands.is_empty());
+}
+
+#[test]
+fn formatting_handles_minimum_signed_value() {
+    assert_eq!(
+        format_minor(i64::MIN, "VND"),
+        "-9.223.372.036.854.775.808 ₫"
+    );
 }
