@@ -16,7 +16,8 @@ use tower_http::trace::TraceLayer;
 use crate::db::{check_connection, check_migrations_current};
 use crate::health::ReadinessState;
 use crate::ingress::{
-    IngressOutcome, IngressRequest, IngressSource, IngressStore, process_text_command,
+    IngressOutcome, IngressRequest, IngressSource, IngressStore, process_image,
+    process_text_command,
 };
 use crate::provider::{InboundEventKind, SECRET_HEADER, ZaloHttpAdapter};
 
@@ -91,28 +92,57 @@ async fn zalo_webhook_handler(
         Ok(bytes) => bytes,
         Err(_) => return status_json(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
     };
-    let event = match service.adapter.parse_text_webhook(&bytes) {
+    let text_event = match service.adapter.parse_text_webhook(&bytes) {
         Ok(event) => event,
         Err(_) => return status_json(StatusCode::BAD_REQUEST, "invalid_payload"),
     };
-    if !matches!(event.kind, InboundEventKind::TextReceived) {
+
+    if matches!(text_event.kind, InboundEventKind::TextReceived) {
+        let sender_allowed = service
+            .allowed_provider_sender_ids
+            .contains(&text_event.sender_id);
+        let ingress = IngressRequest {
+            source: IngressSource::Webhook,
+            provider_scope: text_event.provider_scope,
+            provider_event_id: text_event.event_id,
+            provider_sender_id: text_event.sender_id,
+            provider_chat_id: text_event.chat_id,
+            sender_allowed,
+            user_text: text_event.text,
+            observed_at: text_event.received_at,
+        };
+        return match process_text_command(&service.store, ingress).await {
+            Ok(IngressOutcome::Accepted { .. }) => status_json(StatusCode::OK, "accepted"),
+            Ok(IngressOutcome::Duplicate { .. }) => status_json(StatusCode::OK, "duplicate"),
+            Ok(IngressOutcome::ModeRejected { .. }) => {
+                status_json(StatusCode::CONFLICT, "mode_rejected")
+            }
+            Err(_) => status_json(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+        };
+    }
+
+    let image_event = match service.adapter.parse_image_webhook(&bytes) {
+        Ok(event) => event,
+        Err(_) => return status_json(StatusCode::BAD_REQUEST, "invalid_payload"),
+    };
+    if !matches!(image_event.kind, InboundEventKind::ImageReceived) {
         return status_json(StatusCode::OK, "unsupported");
     }
 
     let sender_allowed = service
         .allowed_provider_sender_ids
-        .contains(&event.sender_id);
+        .contains(&image_event.sender_id);
     let ingress = IngressRequest {
         source: IngressSource::Webhook,
-        provider_scope: event.provider_scope,
-        provider_event_id: event.event_id,
-        provider_sender_id: event.sender_id,
-        provider_chat_id: event.chat_id,
+        provider_scope: image_event.provider_scope,
+        provider_event_id: image_event.event_id,
+        provider_sender_id: image_event.sender_id,
+        provider_chat_id: image_event.chat_id,
         sender_allowed,
-        user_text: event.text,
-        observed_at: event.received_at,
+        user_text: image_event.caption,
+        observed_at: image_event.received_at,
     };
-    match process_text_command(&service.store, ingress).await {
+    match process_image(&service.store, ingress, image_event.image_url).await {
         Ok(IngressOutcome::Accepted { .. }) => status_json(StatusCode::OK, "accepted"),
         Ok(IngressOutcome::Duplicate { .. }) => status_json(StatusCode::OK, "duplicate"),
         Ok(IngressOutcome::ModeRejected { .. }) => {

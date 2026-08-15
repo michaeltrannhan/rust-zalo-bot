@@ -2,11 +2,13 @@
 
 mod application;
 mod effects;
+mod followup;
 mod store;
 mod types;
 
 pub use application::{process_image, process_text_command, store_with_receipt};
 pub use effects::{IngressEffect, IngressEffectError};
+pub use followup::enqueue_receipt_review_followup;
 pub use store::{IngressError, IngressStore};
 pub use types::{
     DecisionContext, DecisionOutput, ExpenseState, IngressEventKind, IngressObservation,

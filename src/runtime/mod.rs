@@ -1,8 +1,10 @@
 //! Supervised Tokio runtime with role-based task supervision.
 
+mod jobs;
 mod roles;
 mod shutdown;
 
+pub use jobs::{JobDeps, dispatch_leased_job};
 pub use roles::{Role, RuntimeOptions, all_roles, parse_roles};
 pub use shutdown::ShutdownSignal;
 
@@ -20,9 +22,10 @@ use crate::db::{check_connection, check_migrations_current, create_pool, migrate
 use crate::error::{AppError, ExitCode};
 use crate::health::ReadinessState;
 use crate::http::{AppState, WebhookService, router};
-use crate::ingress::IngressStore;
-use crate::outbound::{OutboundJobExecution, deliver_for_job};
+use crate::ingress::store_with_receipt;
+use crate::outbound::OutboundJobExecution;
 use crate::provider::{ZaloHttpAdapter, ZaloHttpConfig};
+use crate::receipt::{InMemoryObjectStore, ReceiptConfig, ReceiptLifecycle};
 use crate::work::{ClaimOptions, ClaimedJob, WorkStore};
 
 const CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -82,10 +85,19 @@ pub async fn run(config: ResolvedConfig, options: RuntimeOptions) -> ExitCode {
         None
     };
 
+    let receipt_lifecycle = ReceiptLifecycle::new(
+        pool.clone(),
+        InMemoryObjectStore::new(),
+        ReceiptConfig {
+            original_receipt_days: config.original_receipt_days,
+            review_expiry_hours: ReceiptConfig::default().review_expiry_hours,
+        },
+    );
+
     let webhook = if roles.contains(&Role::Ingress) {
         Some(Arc::new(WebhookService::new(
             Arc::clone(zalo_adapter.as_ref().expect("adapter initialized")),
-            IngressStore::new(pool.clone()),
+            store_with_receipt(pool.clone(), receipt_lifecycle.clone()),
             config.allowed_provider_sender_ids.clone(),
             config.webhook_max_body_bytes,
         )))
@@ -126,11 +138,16 @@ pub async fn run(config: ResolvedConfig, options: RuntimeOptions) -> ExitCode {
     }
 
     if roles.contains(&Role::Worker) {
+        let job_deps = Arc::new(jobs::JobDeps::production(
+            pool.clone(),
+            Arc::clone(zalo_adapter.as_ref().expect("adapter initialized")),
+            receipt_lifecycle,
+        ));
         role_tasks.insert(
             "worker",
             outbound_worker_task(
                 pool.clone(),
-                Arc::clone(zalo_adapter.as_ref().expect("adapter initialized")),
+                job_deps,
                 config.outbound_delivery,
                 config.zalo_send_timeout_seconds,
                 shutdown_rx.clone(),
@@ -194,7 +211,7 @@ pub async fn run(config: ResolvedConfig, options: RuntimeOptions) -> ExitCode {
 
 fn outbound_worker_task(
     pool: sqlx::PgPool,
-    adapter: Arc<ZaloHttpAdapter>,
+    job_deps: Arc<jobs::JobDeps>,
     outbound_delivery: u32,
     send_timeout_seconds: u64,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -267,14 +284,12 @@ fn outbound_worker_task(
             };
 
             let store = store.clone();
-            let pool = pool.clone();
-            let adapter = Arc::clone(&adapter);
+            let job_deps = Arc::clone(&job_deps);
             let mut shutdown_rx = shutdown_rx.clone();
             in_flight.spawn(async move {
                 let execution = execute_leased_job(
                     &store,
-                    &pool,
-                    &adapter,
+                    &job_deps,
                     &job,
                     lease_duration_secs,
                     heartbeat_interval,
@@ -294,27 +309,21 @@ fn outbound_worker_task(
 
 async fn execute_leased_job(
     store: &WorkStore,
-    pool: &sqlx::PgPool,
-    adapter: &Arc<ZaloHttpAdapter>,
+    job_deps: &jobs::JobDeps,
     job: &ClaimedJob,
     lease_duration_secs: i64,
     heartbeat_interval: Duration,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> OutboundJobExecution {
-    let delivery = deliver_for_job(pool, adapter, job);
-    tokio::pin!(delivery);
+    let dispatch = jobs::dispatch_leased_job(job_deps, job);
+    tokio::pin!(dispatch);
 
     let mut heartbeat = tokio::time::interval(heartbeat_interval);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
-            result = &mut delivery => {
-                return match result {
-                    Ok(execution) => execution,
-                    Err(_) => OutboundJobExecution::Fail(crate::error::ErrorClass::Dependency),
-                };
-            }
+            result = &mut dispatch => return result,
             _ = heartbeat.tick() => {
                 if store
                     .heartbeat(job.id, job.lease_token, lease_duration_secs)
