@@ -69,7 +69,8 @@ fn enqueue_request(
         dedupe_key: dedupe_key.to_string(),
         serialization_key: serialization_key.map(str::to_string),
         priority,
-        run_at: Utc::now() + ChronoDuration::seconds(run_at_offset_secs),
+        run_at: Utc::now() + ChronoDuration::seconds(run_at_offset_secs)
+            - ChronoDuration::milliseconds(50),
         max_attempts: 5,
     }
 }
@@ -453,6 +454,44 @@ async fn classified_retry_and_dead_letter_paths() {
         .await
         .expect("dead summary");
     assert_eq!(dead.state, JobState::Dead);
+}
+
+#[tokio::test]
+async fn repeated_lease_loss_dead_letters_at_the_attempt_limit() {
+    let _guard = common::integration_lock();
+    let Some(_) =
+        common::skip_without_database("repeated_lease_loss_dead_letters_at_the_attempt_limit")
+    else {
+        return;
+    };
+    let pool = fresh_pool().await;
+    let store = WorkStore::new(pool.clone());
+    let mut request = enqueue_request("lease-loss-limit", None, 0, 0);
+    request.max_attempts = 2;
+    let job_id = request.id;
+    store.enqueue(request).await.expect("enqueue");
+
+    for owner in ["worker-1", "worker-2"] {
+        let claimed = store.claim(claim_options(1, owner)).await.expect("claim");
+        assert_eq!(claimed.len(), 1);
+        sqlx::query("UPDATE jobs SET lease_deadline = NOW() - INTERVAL '1 second' WHERE id = $1")
+            .bind(job_id)
+            .execute(&pool)
+            .await
+            .expect("expire");
+    }
+
+    assert!(
+        store
+            .claim(claim_options(1, "worker-3"))
+            .await
+            .expect("sweep exhausted job")
+            .is_empty()
+    );
+    let summary = store.get_job_summary(job_id).await.expect("summary");
+    assert_eq!(summary.state, JobState::Dead);
+    assert_eq!(summary.attempt_count, 2);
+    assert_eq!(summary.last_error_class.as_deref(), Some("timeout"));
 }
 
 #[tokio::test]

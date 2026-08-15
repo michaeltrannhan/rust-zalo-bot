@@ -105,7 +105,8 @@ impl WorkStore {
                 dedupe_key,
                 serialization_key,
                 state,
-                attempt_count
+                attempt_count,
+                max_attempts
             FROM jobs
             WHERE (
                 (state = 'queued' AND run_at <= NOW())
@@ -152,6 +153,28 @@ impl WorkStore {
             }
             if candidate.state == JobState::Leased {
                 close_open_attempt(&mut tx, candidate.id, AttemptOutcome::LostLease, None).await?;
+                if candidate.attempt_count >= candidate.max_attempts {
+                    sqlx::query(
+                        r#"
+                        UPDATE jobs
+                        SET state = 'dead',
+                            lease_token = NULL,
+                            lease_owner = NULL,
+                            lease_deadline = NULL,
+                            last_error_class = 'timeout',
+                            completed_at = NOW(),
+                            updated_at = NOW()
+                        WHERE id = $1
+                          AND state = 'leased'
+                          AND lease_deadline < NOW()
+                        "#,
+                    )
+                    .bind(candidate.id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|_| WorkError::dependency("expired job dead-letter failed"))?;
+                    continue;
+                }
             }
 
             let attempt_number = candidate.attempt_count + 1;
@@ -653,6 +676,7 @@ struct CandidateRow {
     serialization_key: Option<String>,
     state: JobState,
     attempt_count: i32,
+    max_attempts: i32,
 }
 
 #[derive(Debug, sqlx::FromRow)]
