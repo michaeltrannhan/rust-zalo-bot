@@ -1,8 +1,11 @@
 //! PostgreSQL-backed ingress persistence and transactional processing.
 
 use chrono::{DateTime, Utc};
+use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
+
+use crate::work::{EnqueueRequest, WorkStore};
 
 use super::effects::{IngressEffect, IngressEffectError};
 use super::types::{
@@ -767,8 +770,17 @@ async fn enqueue_reply(
         "reply:{}:{}",
         request.provider_scope, request.provider_event_id
     );
+    let job_dedupe_key = format!("outbound.deliver:{idempotency_key}");
+    let serialization_key = match account_id {
+        Some(account_id) => format!("account:{account_id}"),
+        None => format!(
+            "provider_chat:{}:{}",
+            request.provider_scope, request.provider_chat_id
+        ),
+    };
+
     let outbound_id = Uuid::new_v4();
-    sqlx::query(
+    let inserted_outbound: Option<Uuid> = sqlx::query_scalar(
         r#"
         INSERT INTO outbound_messages (
             id,
@@ -781,16 +793,47 @@ async fn enqueue_reply(
             state
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued')
+        ON CONFLICT (idempotency_key) DO NOTHING
+        RETURNING id
         "#,
     )
     .bind(outbound_id)
     .bind(account_id)
     .bind(inbound_event_id)
-    .bind(idempotency_key)
+    .bind(&idempotency_key)
     .bind(&request.provider_scope)
     .bind(&request.provider_chat_id)
     .bind(&reply.body)
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| IngressEffectError::InvalidTransition)?;
+
+    let outbound_id = if let Some(outbound_id) = inserted_outbound {
+        outbound_id
+    } else {
+        sqlx::query_scalar("SELECT id FROM outbound_messages WHERE idempotency_key = $1")
+            .bind(&idempotency_key)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|_| IngressEffectError::InvalidTransition)?
+    };
+
+    WorkStore::enqueue_in_transaction(
+        tx,
+        EnqueueRequest {
+            id: Uuid::new_v4(),
+            job_type: "outbound.deliver".to_string(),
+            payload: json!({
+                "schema_version": 1,
+                "outbound_id": outbound_id,
+            }),
+            dedupe_key: job_dedupe_key,
+            serialization_key: Some(serialization_key),
+            priority: 0,
+            run_at: Utc::now(),
+            max_attempts: 10,
+        },
+    )
     .await
     .map_err(|_| IngressEffectError::InvalidTransition)?;
     Ok(())
