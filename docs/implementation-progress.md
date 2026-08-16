@@ -40,13 +40,19 @@ Current paused-work handoff: `docs/engineering-handoff.md`.
   - [x] Concurrent-claim race root-caused (serialization-key unique violation
         surfaced as dependency error) and fixed with a post-advisory-lock
         recheck; 30/30 repeated concurrent rounds clean
-- [ ] M4 — Receipt-to-expense slice
+- [x] M4 — Receipt-to-expense slice
   - [x] Bounded Zalo media intake (image parsing, SSRF-hardened download)
-        integrated on `main`
   - [x] Durable receipt lifecycle (ingest/extract/review/edit/confirm/reject/
-        retention) integrated on `main` after lead-directed corrections
-  - [ ] Vertical image-webhook-to-confirmed-expense path (ingress hook, runtime
-        job dispatch, conversation commands, acceptance tests)
+        retention and early original deletion)
+  - [x] Image webhook persists a receipt submission and `receipt.ingest` job
+        in the same ingress transaction
+  - [x] Runtime dispatches `receipt.ingest` / `receipt.extract` and enqueues
+        one idempotent review card
+  - [x] Review confirm/edit/reject text commands write through the open
+        ingress transaction
+  - [x] Vertical path proven: image webhook → download → extract →
+        review/edit/confirm/reject → today/history, real PostgreSQL, no
+        external network
 - [ ] M5 — Real extraction and object storage
 - [ ] M6 — Notifications, schedules, deletion, and insights
 - [ ] M7 — Operator depth
@@ -77,6 +83,10 @@ before or immediately after integration.
 | M3 | lead + Composer race fix | `6fb2b8d` | yes, full diff after lead root-cause | direct on `main` | Serialization-lease recheck under advisory xact lock; closes the claim race behind the `claim update failed` flake |
 | M4 | `m4-media-provider` | `e5662d9` | yes, full base diff (prior lead review) | `9b4d871` | Bounded Zalo media intake; media gate re-run by lead before commit |
 | M4 | `m4-receipt-core` | `1265c1c` | yes, Grok defect review + lead verification | `8aa83c7` | Receipt lifecycle; lead-directed corrections: retention sweep deletes objects before marking rows, edit/confirm lock order aligned |
+| M4 | `m4-vertical-core` | `332c0e3` | yes, full base diff; lead fixed today-window test | `efb1536` | Migration 005, image accept, in-tx receipt APIs, receipt_review commands |
+| M4 | `m4-vertical-wiring` | `6f1f63e` | yes, full base diff | `b0a8c64` | HTTP image dispatch, `dispatch_leased_job`, idempotent review follow-up |
+| M4 | lead correction | `99ab0fd` | yes | `9f62a53` | Shared confirmation template; extract-job dedupe fence |
+| M4 | `m4-vertical-tests` | `91d4d3f` | yes, full file review + independent suite | `b200d50` | Seven public-seam vertical tests; worker left the file uncommitted overnight, lead signed after 7/7 + full suite |
 
 ## Validation ledger
 
@@ -100,7 +110,11 @@ before or immediately after integration.
 | M3 | `cargo test --test m3_runtime_worker` | pass | 7 focused runtime tests re-run by lead in the runtime worktree |
 | M4 | Media gate (`zalo_image_parse`, `zalo_media_download`, `zalo_http_contract`) | pass | Re-run by lead in the media worktree before signing |
 | M4 | Receipt gate (lib, lifecycle+retention single-threaded, durable_work) | pass | Independently re-run by lead; re-run again after retention/lock-order corrections (24/24 incl. new rollback test) |
-| M4 | `TEST_DATABASE_URL=… cargo test --all-targets --all-features` | pass | 178 tests after each cherry-pick (`9b4d871`, `8aa83c7`); fmt/clippy/whitespace clean |
+| M4 | `TEST_DATABASE_URL=… cargo test --all-targets --all-features` | pass | 178 tests after media/receipt cherry-picks; 186 after Task A; full suite green after Task B on `main` |
+| M4 | `cargo test --test m4_ingress_image` | pass | 8 ingress image/review-command tests after lead today-window pin |
+| M4 | `cargo test --test m4_runtime_jobs` | pass | 4 dispatch tests: ingest+extract, idempotent review card, SSRF/oversize → `failed_permanent`, unknown type |
+| M4 | `cargo test --test m4_receipt_vertical` | pass | 7 public-seam tests: duplicate webhook, review card, confirm+today/recent, edit then confirm, reject, hash-duplicate absorb, 401/unsupported |
+| M4 | `TEST_DATABASE_URL=… cargo test --all-targets --all-features` after `b200d50` | pass | Full suite including the 7 vertical tests; fmt/clippy clean in the isolated worktree |
 
 ## Accepted residual risks
 
