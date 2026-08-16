@@ -5,8 +5,20 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::account::{
+    ACCOUNT_JOB_PAYLOAD_VERSION, AccountDeletePayload, AccountExportPayload,
+    JOB_TYPE_ACCOUNT_DELETE, JOB_TYPE_ACCOUNT_EXPORT, execute_account_delete,
+    execute_account_export,
+};
+use crate::conversation::{empty_summary_text, today_summary_text};
 use crate::error::ErrorClass;
-use crate::ingress::enqueue_receipt_review_followup;
+use crate::ingress::{
+    IngressPolicy, enqueue_outbound_in_transaction, enqueue_receipt_review_followup,
+};
+use crate::insight::{
+    FakeNarrator, INSIGHT_NARRATE_PAYLOAD_VERSION, InsightNarratePayload, InsightNarrator,
+    JOB_TYPE_INSIGHT_NARRATE, execute_insight_narrate, narrate_dedupe_key,
+};
 use crate::outbound::{DeliveryResult, DeliveryState, OutboundJobExecution, deliver_for_job};
 use crate::provider::{
     MediaHostResolver, SystemMediaResolver, ZaloHttpAdapter, ZaloMediaDownloader,
@@ -14,6 +26,9 @@ use crate::provider::{
 use crate::receipt::{
     ExtractOutcome, IngestOutcome, JOB_TYPE_EXTRACT, JOB_TYPE_INGEST, ReceiptJobPayload,
     ReceiptLifecycle, extract_dedupe_key, ingest_dedupe_key,
+};
+use crate::schedule::{
+    JOB_TYPE_SCHEDULE_EMIT, SCHEDULE_PAYLOAD_VERSION, ScheduleEmitPayload, schedule_emit_dedupe_key,
 };
 use crate::work::ClaimedJob;
 
@@ -24,7 +39,9 @@ pub struct JobDeps<R: MediaHostResolver = SystemMediaResolver> {
     pub pool: PgPool,
     pub adapter: Arc<ZaloHttpAdapter>,
     pub receipt: ReceiptLifecycle,
+    pub ingress_policy: IngressPolicy,
     pub media_downloader: ZaloMediaDownloader<R>,
+    pub insight_narrator: Arc<dyn InsightNarrator>,
 }
 
 impl JobDeps<SystemMediaResolver> {
@@ -32,15 +49,18 @@ impl JobDeps<SystemMediaResolver> {
         pool: PgPool,
         adapter: Arc<ZaloHttpAdapter>,
         receipt: ReceiptLifecycle,
+        ingress_policy: IngressPolicy,
     ) -> Self {
         Self {
             pool,
             adapter,
             receipt,
+            ingress_policy,
             media_downloader: ZaloMediaDownloader::new(
                 crate::provider::MediaDownloadPolicy::production_default(),
                 SystemMediaResolver,
             ),
+            insight_narrator: Arc::new(FakeNarrator),
         }
     }
 }
@@ -50,13 +70,17 @@ impl<R: MediaHostResolver> JobDeps<R> {
         pool: PgPool,
         adapter: Arc<ZaloHttpAdapter>,
         receipt: ReceiptLifecycle,
+        ingress_policy: IngressPolicy,
         media_downloader: ZaloMediaDownloader<R>,
+        insight_narrator: Arc<dyn InsightNarrator>,
     ) -> Self {
         Self {
             pool,
             adapter,
             receipt,
+            ingress_policy,
             media_downloader,
+            insight_narrator,
         }
     }
 }
@@ -73,6 +97,10 @@ pub async fn dispatch_leased_job<R: MediaHostResolver>(
         },
         JOB_TYPE_INGEST => dispatch_receipt_ingest(deps, job).await,
         JOB_TYPE_EXTRACT => dispatch_receipt_extract(deps, job).await,
+        JOB_TYPE_SCHEDULE_EMIT => dispatch_schedule_emit(deps, job).await,
+        JOB_TYPE_ACCOUNT_DELETE => dispatch_account_delete(deps, job).await,
+        JOB_TYPE_ACCOUNT_EXPORT => dispatch_account_export(deps, job).await,
+        JOB_TYPE_INSIGHT_NARRATE => dispatch_insight_narrate(deps, job).await,
         _ => OutboundJobExecution::InvalidJob,
     }
 }
@@ -162,9 +190,15 @@ async fn dispatch_receipt_extract<R: MediaHostResolver>(
     match deps.receipt.extract(account_id, submission_id).await {
         Ok(ExtractOutcome::ReviewRequired { .. })
         | Ok(ExtractOutcome::AlreadyReviewRequired { .. }) => {
-            if enqueue_receipt_review_followup(&deps.pool, &deps.receipt, account_id, submission_id)
-                .await
-                .is_err()
+            if enqueue_receipt_review_followup(
+                &deps.pool,
+                &deps.receipt,
+                &deps.ingress_policy,
+                account_id,
+                submission_id,
+            )
+            .await
+            .is_err()
             {
                 return OutboundJobExecution::Fail(ErrorClass::Dependency);
             }
@@ -231,4 +265,203 @@ fn receipt_job_complete() -> OutboundJobExecution {
         outbound_id: Uuid::nil(),
         state: DeliveryState::Sent,
     })
+}
+
+async fn dispatch_schedule_emit<R: MediaHostResolver>(
+    deps: &JobDeps<R>,
+    job: &ClaimedJob,
+) -> OutboundJobExecution {
+    if job.job_type != JOB_TYPE_SCHEDULE_EMIT || job.payload_version != SCHEDULE_PAYLOAD_VERSION {
+        return OutboundJobExecution::InvalidJob;
+    }
+
+    let payload: ScheduleEmitPayload = match serde_json::from_value(job.payload.clone()) {
+        Ok(payload) => payload,
+        Err(_) => return OutboundJobExecution::InvalidJob,
+    };
+    if payload.schema_version != SCHEDULE_PAYLOAD_VERSION {
+        return OutboundJobExecution::InvalidJob;
+    }
+    if job.dedupe_key
+        != schedule_emit_dedupe_key(payload.account_id, &payload.frequency, payload.period_start)
+    {
+        return OutboundJobExecution::InvalidJob;
+    }
+
+    let lifecycle: Option<String> =
+        sqlx::query_scalar("SELECT lifecycle_state FROM accounts WHERE id = $1")
+            .bind(payload.account_id)
+            .fetch_optional(&deps.pool)
+            .await
+            .ok()
+            .flatten();
+    if matches!(
+        lifecycle.as_deref(),
+        Some("suspended") | Some("deleting") | Some("deleted") | None
+    ) {
+        return receipt_job_complete();
+    }
+
+    let schedule_row: Option<(String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT provider_scope, provider_chat_id, frequency
+        FROM summary_schedules
+        WHERE id = $1 AND account_id = $2 AND enabled = TRUE
+        "#,
+    )
+    .bind(payload.schedule_id)
+    .bind(payload.account_id)
+    .fetch_optional(&deps.pool)
+    .await
+    .ok()
+    .flatten();
+    let Some((provider_scope, provider_chat_id, frequency)) = schedule_row else {
+        return receipt_job_complete();
+    };
+    if frequency != payload.frequency {
+        return OutboundJobExecution::InvalidJob;
+    }
+
+    let totals: Option<(i64, i64, String)> = sqlx::query_as(
+        r#"
+        SELECT COALESCE(SUM(amount_minor), 0)::BIGINT,
+               COUNT(*)::BIGINT,
+               COALESCE(MIN(currency), 'VND')
+        FROM expenses
+        WHERE account_id = $1
+          AND state = 'confirmed'
+          AND occurred_at >= $2
+          AND occurred_at < $3
+        "#,
+    )
+    .bind(payload.account_id)
+    .bind(payload.period_start)
+    .bind(payload.period_end)
+    .fetch_optional(&deps.pool)
+    .await
+    .ok()
+    .flatten();
+    let (total_minor, tx_count, currency) = totals.unwrap_or((0, 0, "VND".to_string()));
+
+    let label = scheduled_period_label(&payload.frequency);
+    let body = if tx_count == 0 {
+        empty_summary_text(label)
+    } else {
+        today_summary_text(label, &currency, total_minor)
+    };
+
+    let idempotency_key = format!(
+        "scheduled-summary:{}:{}:{}",
+        payload.account_id,
+        payload.frequency,
+        payload.period_start.format("%Y%m%dT%H%M%SZ")
+    );
+
+    let mut tx = match deps.pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return OutboundJobExecution::Fail(ErrorClass::Dependency),
+    };
+    if enqueue_outbound_in_transaction(
+        &mut tx,
+        &deps.ingress_policy,
+        chrono::Utc::now(),
+        Some(payload.account_id),
+        None,
+        &provider_scope,
+        &provider_chat_id,
+        &body,
+        &idempotency_key,
+    )
+    .await
+    .is_err()
+    {
+        return OutboundJobExecution::Fail(ErrorClass::Dependency);
+    }
+    if tx.commit().await.is_err() {
+        return OutboundJobExecution::Fail(ErrorClass::Dependency);
+    }
+
+    receipt_job_complete()
+}
+
+async fn dispatch_account_delete<R: MediaHostResolver>(
+    deps: &JobDeps<R>,
+    job: &ClaimedJob,
+) -> OutboundJobExecution {
+    if job.job_type != JOB_TYPE_ACCOUNT_DELETE || job.payload_version != ACCOUNT_JOB_PAYLOAD_VERSION
+    {
+        return OutboundJobExecution::InvalidJob;
+    }
+    let payload: AccountDeletePayload = match serde_json::from_value(job.payload.clone()) {
+        Ok(payload) => payload,
+        Err(_) => return OutboundJobExecution::InvalidJob,
+    };
+    match execute_account_delete(&deps.pool, deps.receipt.object_store().as_ref(), &payload).await {
+        Ok(()) => receipt_job_complete(),
+        Err(ErrorClass::Validation) => OutboundJobExecution::InvalidJob,
+        Err(class) => OutboundJobExecution::Fail(class),
+    }
+}
+
+async fn dispatch_account_export<R: MediaHostResolver>(
+    deps: &JobDeps<R>,
+    job: &ClaimedJob,
+) -> OutboundJobExecution {
+    if job.job_type != JOB_TYPE_ACCOUNT_EXPORT || job.payload_version != ACCOUNT_JOB_PAYLOAD_VERSION
+    {
+        return OutboundJobExecution::InvalidJob;
+    }
+    let payload: AccountExportPayload = match serde_json::from_value(job.payload.clone()) {
+        Ok(payload) => payload,
+        Err(_) => return OutboundJobExecution::InvalidJob,
+    };
+    match execute_account_export(&deps.pool, deps.receipt.object_store().as_ref(), &payload).await {
+        Ok(()) => receipt_job_complete(),
+        Err(ErrorClass::Validation) => OutboundJobExecution::InvalidJob,
+        Err(class) => OutboundJobExecution::Fail(class),
+    }
+}
+
+async fn dispatch_insight_narrate<R: MediaHostResolver>(
+    deps: &JobDeps<R>,
+    job: &ClaimedJob,
+) -> OutboundJobExecution {
+    if !deps.ingress_policy.insights_llm_enabled {
+        return receipt_job_complete();
+    }
+    if job.job_type != JOB_TYPE_INSIGHT_NARRATE
+        || job.payload_version != INSIGHT_NARRATE_PAYLOAD_VERSION
+    {
+        return OutboundJobExecution::InvalidJob;
+    }
+    let payload: InsightNarratePayload = match serde_json::from_value(job.payload.clone()) {
+        Ok(payload) => payload,
+        Err(_) => return OutboundJobExecution::InvalidJob,
+    };
+    if payload.schema_version != INSIGHT_NARRATE_PAYLOAD_VERSION {
+        return OutboundJobExecution::InvalidJob;
+    }
+    if job.dedupe_key != narrate_dedupe_key(payload.snapshot_id, &payload.aggregate_digest) {
+        return OutboundJobExecution::InvalidJob;
+    }
+    match execute_insight_narrate(
+        &deps.pool,
+        deps.insight_narrator.as_ref(),
+        &payload,
+        deps.ingress_policy.monthly_insight_narratives,
+    )
+    .await
+    {
+        Ok(()) => receipt_job_complete(),
+        Err(_) => OutboundJobExecution::Fail(ErrorClass::Dependency),
+    }
+}
+
+fn scheduled_period_label(frequency: &str) -> &'static str {
+    match frequency {
+        "daily" => "Hôm qua",
+        "weekly" => "Tuần trước",
+        "monthly" => "Tháng trước",
+        _ => "Tổng kết",
+    }
 }

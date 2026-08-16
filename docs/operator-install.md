@@ -13,6 +13,7 @@ milestones.
 | `/usr/share/zl-expense/config.example.toml` | Reference configuration |
 | `/etc/zl-expense/config.toml` | Operator configuration (created on first install; not overwritten) |
 | `/etc/zl-expense/credentials/` | Credential files (`root:zl-expense`, mode `0750`) |
+| `/etc/zl-expense/update-keys/` | Ed25519 verifying keys for signed updates |
 | `/var/lib/zl-expense/` | State, receipt objects, update metadata |
 | `/run/zl-expense/` | Runtime directory (systemd `RuntimeDirectory`) |
 | `/lib/systemd/system/zl-expense.service` | Default hardened unit |
@@ -48,16 +49,25 @@ conffile; first install copies the example only when missing.
 
 5. Provision the database credential file named by `database.url_credential`
    under `/etc/zl-expense/credentials/`, owned by root and readable by the
-   service group. Interactive `secret set` arrives in Milestone 7. Do not place
-   secret values in `config.toml` or command arguments.
+   service group. Interactive `secret set` arrives in a later milestone. Until
+   then, manage credential files directly. Do not place secret values in
+   `config.toml` or command arguments.
 
-6. Apply migrations:
+6. Validate configuration and dependencies:
+
+   ```bash
+   sudo zl-expense config validate
+   sudo zl-expense doctor
+   sudo zl-expense status --json
+   ```
+
+7. Apply migrations:
 
    ```bash
    sudo zl-expense db migrate
    ```
 
-7. Enable and start the service:
+8. Enable and start the service:
 
    ```bash
    sudo systemctl enable --now zl-expense.service
@@ -65,7 +75,7 @@ conffile; first install copies the example only when missing.
    journalctl -u zl-expense.service -n 50
    ```
 
-8. Verify health (private listener default):
+9. Verify health (private listener default):
 
    ```bash
    curl -fsS http://127.0.0.1:8080/health/live
@@ -114,24 +124,39 @@ server {
 Firewall public ports to the proxy only; do not expose PostgreSQL or the application
 loopback port on public interfaces.
 
-## systemd unit (Milestone 1)
+## systemd unit (Milestone 7)
 
-The packaged unit uses `Type=simple` because Milestone 1 does not yet call `sd_notify`.
-Milestone 7 adds `Type=notify`, `NotifyAccess=main`, and `WatchdogSec` once the runtime
-signals readiness and watchdog heartbeats.
+The packaged unit uses `Type=notify`, `NotifyAccess=main`, and `WatchdogSec=30s`.
+The runtime sends `READY=1` after listen and migrations, and watchdog heartbeats
+while running. `TimeoutStopSec=30s` aligns with graceful drain.
 
 Hardening highlights:
 
 - `User=zl-expense`, `StateDirectory=zl-expense`, `RuntimeDirectory=zl-expense`
 - `Restart=on-failure`, `RestartSec=5s`, `TimeoutStopSec=30s`
+- `MemoryMax=384M`, `TasksMax=256`
 - `NoNewPrivileges=true`, `ProtectSystem=strict`, `PrivateTmp=true`, namespace and
   syscall restrictions
 - Logs via journald (`StandardOutput=journal`, `SyslogIdentifier=zl-expense`)
 
-Optional resource caps (`MemoryMax`, `TasksMax`, `CPUQuota`) are operator-tuned in
-later milestones.
-
 ## Upgrade
+
+Prefer the signed update path:
+
+```bash
+sudo zl-expense update preflight --artifact /tmp/zl-expense --metadata /tmp/metadata.json --signature /tmp/metadata.sig
+sudo zl-expense update apply --artifact /tmp/zl-expense --metadata /tmp/metadata.json --signature /tmp/metadata.sig --yes
+sudo systemctl restart zl-expense.service
+```
+
+`update apply` verifies the Ed25519 signature and SHA-256 checksum, takes a database
+backup, replaces the binary atomically, migrates, and checks `/health/ready`. If health
+fails, the previous binary is restored only when the previous schema compatibility
+range still covers the database. Otherwise the command stops and points at the backup.
+
+Public keys live in `/etc/zl-expense/update-keys/` (64-character hex verifying keys).
+
+Package install remains available:
 
 ```bash
 sudo dpkg -i dist/zl-expense_<new-version>_<arch>.deb
@@ -192,4 +217,4 @@ docker compose -f compose.yaml down -v
 | Webhook 502 from proxy | Proxy targets loopback port; application listener not on `0.0.0.0` unless configured |
 | Permission errors on credentials | Directory mode `0750`, group `zl-expense`; files readable by service user |
 
-For redacted diagnostics, use `zl-expense diagnose` when available (Milestone 7 depth).
+For redacted diagnostics, use `zl-expense diagnose` and see `docs/operator-runbook.md`.

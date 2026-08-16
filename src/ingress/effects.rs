@@ -55,6 +55,24 @@ pub enum IngressEffect {
         expected_draft_version: i32,
         amount_minor: i64,
     },
+    SetTimezone {
+        iana: String,
+    },
+    UpsertSummarySchedule {
+        frequency: String,
+        delivery_minute: i32,
+    },
+    DisableSummarySchedule {
+        frequency: Option<String>,
+    },
+    ArmAccountDeletion {
+        expires_at: DateTime<Utc>,
+    },
+    ConfirmAccountDeletion,
+    RequestAccountExport,
+    RecordInsightSnapshot {
+        period_kind: String,
+    },
     ReadOnly,
 }
 

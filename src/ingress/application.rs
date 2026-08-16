@@ -4,11 +4,13 @@ use uuid::Uuid;
 
 use crate::conversation::{
     self, AccountContext, DomainCommand, LifecycleState as ConversationLifecycle, ManualDraftView,
-    PendingConfirmation, PendingKind, PeriodSummary, RecentExpenseLine, transaction_type_label,
+    PendingConfirmation, PendingKind, PeriodSummary, RecentExpenseLine, ScheduleLine,
+    transaction_type_label,
 };
 use crate::receipt::ReceiptLifecycle;
 
 use super::effects::{IngressEffect, IngressEffectError};
+use super::policy::IngressPolicy;
 use super::store::{IngressError, IngressStore};
 use super::types::{
     DecisionContext, DecisionOutput, ExpenseState, IngressEventKind, IngressObservation,
@@ -53,6 +55,15 @@ pub async fn process_image(
 /// Build an ingress store wired for image receipt acceptance.
 pub fn store_with_receipt(pool: sqlx::PgPool, receipt: ReceiptLifecycle) -> IngressStore {
     IngressStore::with_receipt(pool, receipt)
+}
+
+/// Build an ingress store with receipt lifecycle and ingress policy.
+pub fn store_with_receipt_and_policy(
+    pool: sqlx::PgPool,
+    receipt: ReceiptLifecycle,
+    policy: IngressPolicy,
+) -> IngressStore {
+    IngressStore::with_receipt_and_policy(pool, receipt, policy)
 }
 
 fn decide_text_and_map(context: DecisionContext) -> Result<DecisionOutput, IngressEffectError> {
@@ -106,11 +117,26 @@ fn to_conversation_context(
         Some(LifecycleState::PendingConsent) | None => ConversationLifecycle::PendingConsent,
     };
 
-    let pending = context
-        .pending_action
-        .as_ref()
-        .and_then(|pending| match pending.action_type.as_str() {
-            "manual_expense_confirmation" => pending.expense.as_ref().map(|expense| {
+    let pending = match context.pending_action.as_ref() {
+        Some(pending) if pending.action_type == "account_deletion" => Some(PendingConfirmation {
+            kind: PendingKind::AccountDeletion,
+            reference_id: context.account_id.unwrap_or(Uuid::nil()),
+            optimistic_version: pending.version as u64,
+            expires_at: pending.expires_at,
+            draft: ManualDraftView {
+                version: pending.version as u64,
+                amount_minor: 0,
+                currency: context.default_currency.clone(),
+                merchant: String::new(),
+                category_display: String::new(),
+                type_label: String::new(),
+                date_display: String::new(),
+            },
+        }),
+        Some(pending) => pending
+            .expense
+            .as_ref()
+            .map(|expense| {
                 (
                     PendingKind::ManualExpense,
                     expense.id,
@@ -122,53 +148,51 @@ fn to_conversation_context(
                     "Khác".to_string(),
                     "Chi tiêu".to_string(),
                 )
-            }),
-            "receipt_review" => pending.receipt_draft.as_ref().map(|draft| {
-                (
-                    PendingKind::ReceiptReview,
-                    draft.submission_id,
-                    draft.version as u64,
-                    draft.amount_minor,
-                    draft.currency.clone(),
-                    draft.merchant.clone(),
-                    conversation::format_date_vn(draft.occurred_at, &context.timezone),
-                    draft.category_display.clone(),
-                    transaction_type_label(&draft.transaction_type).to_string(),
-                )
-            }),
-            _ => None,
-        })
-        .map(
-            |(
-                kind,
-                reference_id,
-                version,
-                amount_minor,
-                currency,
-                merchant,
-                date_display,
-                category_display,
-                type_label,
-            )| PendingConfirmation {
-                kind,
-                reference_id,
-                optimistic_version: version,
-                expires_at: context
-                    .pending_action
-                    .as_ref()
-                    .expect("pending action")
-                    .expires_at,
-                draft: ManualDraftView {
+            })
+            .or_else(|| {
+                pending.receipt_draft.as_ref().map(|draft| {
+                    (
+                        PendingKind::ReceiptReview,
+                        draft.submission_id,
+                        draft.version as u64,
+                        draft.amount_minor,
+                        draft.currency.clone(),
+                        draft.merchant.clone(),
+                        conversation::format_date_vn(draft.occurred_at, &context.timezone),
+                        draft.category_display.clone(),
+                        transaction_type_label(&draft.transaction_type).to_string(),
+                    )
+                })
+            })
+            .map(
+                |(
+                    kind,
+                    reference_id,
                     version,
                     amount_minor,
                     currency,
                     merchant,
+                    date_display,
                     category_display,
                     type_label,
-                    date_display,
+                )| PendingConfirmation {
+                    kind,
+                    reference_id,
+                    optimistic_version: version,
+                    expires_at: pending.expires_at,
+                    draft: ManualDraftView {
+                        version,
+                        amount_minor,
+                        currency,
+                        merchant,
+                        category_display,
+                        type_label,
+                        date_display,
+                    },
                 },
-            },
-        );
+            ),
+        None => None,
+    };
 
     let recent_lines = context
         .recent_expenses
@@ -190,9 +214,11 @@ fn to_conversation_context(
         next_ingest_job_id: context.next_ingest_job_id,
         lifecycle,
         allowlisted: context.sender_allowed,
-        default_currency: "VND".to_string(),
+        default_currency: context.default_currency.clone(),
         timezone: context.timezone.clone(),
         original_receipt_retention_days: context.original_receipt_retention_days,
+        remaining_daily_receipts: context.remaining_daily_receipts,
+        confirmed_expense_count: context.confirmed_expense_count,
         pending,
         today_summary: Some(PeriodSummary {
             label: "Hôm nay".to_string(),
@@ -200,6 +226,27 @@ fn to_conversation_context(
             total_minor: context.confirmed_today_total_minor,
             tx_count: context.confirmed_today_count,
         }),
+        week_summary: Some(PeriodSummary {
+            label: "Tuần này".to_string(),
+            currency: context.week_currency.clone(),
+            total_minor: context.week_total_minor,
+            tx_count: context.week_tx_count,
+        }),
+        month_summary: Some(PeriodSummary {
+            label: "Tháng này".to_string(),
+            currency: context.month_currency.clone(),
+            total_minor: context.month_total_minor,
+            tx_count: context.month_tx_count,
+        }),
+        schedules: context
+            .schedules
+            .iter()
+            .map(|schedule| ScheduleLine {
+                frequency: schedule.frequency.clone(),
+                delivery_minute: schedule.delivery_minute,
+                enabled: schedule.enabled,
+            })
+            .collect(),
         recent_lines,
     })
 }
@@ -288,5 +335,26 @@ fn map_command(
         DomainCommand::ClearPending => Ok(IngressEffect::ClearPendingAction {
             expected_version: pending_state_version.ok_or(IngressEffectError::NotFound)?,
         }),
+        DomainCommand::SetTimezone { iana } => Ok(IngressEffect::SetTimezone { iana }),
+        DomainCommand::UpsertSchedule {
+            frequency,
+            delivery_minute,
+        } => Ok(IngressEffect::UpsertSummarySchedule {
+            frequency,
+            delivery_minute,
+        }),
+        DomainCommand::DisableSchedule { frequency } => {
+            Ok(IngressEffect::DisableSummarySchedule { frequency })
+        }
+        DomainCommand::RequestAccountDeletion { pending_expires_at } => {
+            Ok(IngressEffect::ArmAccountDeletion {
+                expires_at: pending_expires_at,
+            })
+        }
+        DomainCommand::ConfirmAccountDeletion => Ok(IngressEffect::ConfirmAccountDeletion),
+        DomainCommand::RequestAccountExport => Ok(IngressEffect::RequestAccountExport),
+        DomainCommand::RecordInsightSnapshot { period_kind } => {
+            Ok(IngressEffect::RecordInsightSnapshot { period_kind })
+        }
     }
 }

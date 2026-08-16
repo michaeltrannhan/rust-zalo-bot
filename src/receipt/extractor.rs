@@ -4,11 +4,12 @@ use chrono::{TimeZone, Utc};
 use sha2::{Digest, Sha256};
 
 use super::error::ReceiptError;
-use super::types::ExtractionResult;
+use super::types::{ExtractedAttempt, ExtractionMeta, ExtractionResult};
 
 /// Narrow extractor seam so tests can force transient or permanent failure.
 pub trait ReceiptExtractor: Send + Sync {
-    fn extract(&self, bytes: &[u8]) -> Result<ExtractionResult, ReceiptError>;
+    fn extract(&self, bytes: &[u8]) -> Result<ExtractedAttempt, ReceiptError>;
+    fn meta(&self) -> ExtractionMeta;
 }
 
 /// Deterministic corpus extractor used in M4 tests and local runs.
@@ -16,8 +17,15 @@ pub trait ReceiptExtractor: Send + Sync {
 pub struct FakeExtractor;
 
 impl ReceiptExtractor for FakeExtractor {
-    fn extract(&self, bytes: &[u8]) -> Result<ExtractionResult, ReceiptError> {
-        extract(bytes)
+    fn extract(&self, bytes: &[u8]) -> Result<ExtractedAttempt, ReceiptError> {
+        Ok(ExtractedAttempt {
+            result: extract(bytes)?,
+            meta: self.meta(),
+        })
+    }
+
+    fn meta(&self) -> ExtractionMeta {
+        ExtractionMeta::fake()
     }
 }
 

@@ -67,6 +67,143 @@ pub fn today_summary_text(label: &str, currency: &str, total_minor: i64) -> Stri
     format!("{label} — chi tiêu đã ghi nhận:\n\nTổng: {amount}")
 }
 
+pub fn period_summary_text(
+    label: &str,
+    currency: &str,
+    total_minor: i64,
+    categories: &[(String, i64)],
+) -> String {
+    let mut body = today_summary_text(label, currency, total_minor);
+    for (display, minor) in categories.iter().take(3) {
+        body.push_str(&format!(
+            "\n• {display}: {}",
+            format_minor(*minor, currency)
+        ));
+    }
+    body
+}
+
+pub fn settings_text(
+    timezone: &str,
+    currency: &str,
+    schedules: &[super::types::ScheduleLine],
+) -> String {
+    let mut body = String::from("Cài đặt của bạn:\n\n");
+    body.push_str(&format!("• Múi giờ: {timezone}\n"));
+    body.push_str(&format!("• Tiền tệ mặc định: {currency}\n"));
+    body.push_str("• Tổng kết tự động: ");
+    let active: Vec<&super::types::ScheduleLine> =
+        schedules.iter().filter(|line| line.enabled).collect();
+    if active.is_empty() {
+        body.push_str("chưa bật");
+    } else {
+        for (index, line) in active.iter().enumerate() {
+            if index > 0 {
+                body.push(',');
+            }
+            body.push_str(&format!(
+                " {} {:02}:{:02}",
+                schedule_frequency_label(&line.frequency),
+                line.delivery_minute / 60,
+                line.delivery_minute % 60
+            ));
+        }
+    }
+    body.push_str("\n\nThay đổi:\n/tz Asia/Ho_Chi_Minh\n/sched daily 20:00");
+    body
+}
+
+pub fn settings_updated_text(
+    label: &str,
+    value: &str,
+    timezone: &str,
+    currency: &str,
+    schedules: &[super::types::ScheduleLine],
+) -> String {
+    format!(
+        "Đã cập nhật {label}: {value}.\n\n{}",
+        settings_text(timezone, currency, schedules)
+    )
+}
+
+pub fn invalid_timezone_text() -> String {
+    "Múi giờ không hợp lệ. Hãy dùng tên IANA, ví dụ Asia/Ho_Chi_Minh, Asia/Bangkok hoặc UTC."
+        .to_string()
+}
+
+pub fn invalid_settings_text() -> String {
+    "Cú pháp chưa đúng. Dùng /settings để xem, /tz Asia/Ho_Chi_Minh để thay đổi múi giờ."
+        .to_string()
+}
+
+pub fn schedule_text(schedules: &[super::types::ScheduleLine]) -> String {
+    let mut body = String::from("Tổng kết tự động:\n");
+    let active: Vec<&super::types::ScheduleLine> =
+        schedules.iter().filter(|line| line.enabled).collect();
+    if active.is_empty() {
+        body.push_str("• Chưa bật lịch nào.\n");
+    } else {
+        for line in active {
+            body.push_str(&format!(
+                "• {} lúc {:02}:{:02}\n",
+                schedule_frequency_label(&line.frequency),
+                line.delivery_minute / 60,
+                line.delivery_minute % 60
+            ));
+        }
+    }
+    body.push_str("\nCài đặt:\n/sched daily 20:00\n/sched weekly 08:00\n/sched monthly 09:00\n/sched off daily — tắt một lịch\n/sched off — tắt tất cả");
+    body
+}
+
+pub fn schedule_set_text(frequency: &str, delivery_minute: i32) -> String {
+    format!(
+        "Đã bật tổng kết {} lúc {:02}:{:02}.",
+        schedule_frequency_label(frequency),
+        delivery_minute / 60,
+        delivery_minute % 60
+    )
+}
+
+pub fn schedule_disabled_text(frequency: Option<&str>) -> String {
+    match frequency {
+        Some(frequency) => format!("Đã tắt tổng kết {}.", schedule_frequency_label(frequency)),
+        None => "Đã tắt tất cả lịch tổng kết.".to_string(),
+    }
+}
+
+pub fn schedule_invalid_text() -> String {
+    "Cú pháp chưa đúng. Ví dụ: /sched daily 20:00, /sched weekly 08:00, hoặc /sched off."
+        .to_string()
+}
+
+pub fn delete_confirm_text(expense_count: u32) -> String {
+    format!(
+        "Bạn sắp xóa toàn bộ dữ liệu ({expense_count} khoản chi). Trả lời ok để xác nhận, no để hủy. Không thể hoàn tác."
+    )
+}
+
+pub fn delete_accepted_text(expense_count: u32) -> String {
+    format!("Đã nhận yêu cầu xóa ({expense_count} khoản chi). Dữ liệu sẽ được gỡ trong ít phút.")
+}
+
+pub fn delete_cancelled_text() -> String {
+    "Đã hủy yêu cầu xóa dữ liệu.".to_string()
+}
+
+pub fn export_accepted_text() -> String {
+    "Đã ghi nhận yêu cầu xuất dữ liệu. File sẽ được giao qua kênh quản trị viên, không gửi đường dẫn trong chat.".to_string()
+}
+
+fn schedule_frequency_label(frequency: &str) -> &str {
+    match frequency {
+        "daily" => "hàng ngày",
+        "weekly" => "hàng tuần",
+        "monthly" => "hàng tháng",
+        _ => frequency,
+    }
+}
+
 pub fn no_recent_text() -> String {
     "Chưa có giao dịch nào được ghi nhận. Gửi ảnh hóa đơn hoặc nhập: \"an sang 500k\".".to_string()
 }
@@ -98,6 +235,14 @@ pub fn default_category_display() -> &'static str {
 
 pub fn image_received_text() -> String {
     "Đã nhận ảnh hóa đơn. Tôi sẽ đọc và gửi lại để bạn xác nhận.".to_string()
+}
+
+pub fn daily_receipt_quota_text() -> String {
+    "Bạn đã đạt giới hạn hóa đơn hôm nay. Mai gửi tiếp nhé.".to_string()
+}
+
+pub fn extraction_kill_switch_text() -> String {
+    "Trích xuất hóa đơn đang tạm tắt.".to_string()
 }
 
 pub fn transaction_type_label(transaction_type: &str) -> &'static str {

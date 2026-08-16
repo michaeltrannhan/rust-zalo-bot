@@ -5,9 +5,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-# Milestone 1: Type=simple until the runtime implements sd_notify readiness (Milestone 7).
-# Upgrade path: Type=notify, NotifyAccess=main, WatchdogSec aligned with app heartbeat.
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=30s
 User=zl-expense
 Group=zl-expense
 ExecStart=/usr/bin/zl-expense run
@@ -21,6 +21,8 @@ RuntimeDirectoryMode=0750
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
+MemoryMax=384M
+TasksMax=256
 
 StandardOutput=journal
 StandardError=journal

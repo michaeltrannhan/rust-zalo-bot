@@ -108,6 +108,17 @@ impl std::fmt::Debug for ClaimedJob {
     }
 }
 
+/// Redacted job row for operator list views (no payload or lease secrets).
+#[derive(Clone, PartialEq, Eq)]
+pub struct JobListRow {
+    pub id: Uuid,
+    pub job_type: String,
+    pub state: JobState,
+    pub attempt_count: i32,
+    pub run_at: DateTime<Utc>,
+    pub last_error_class: Option<String>,
+}
+
 /// Redacted job summary for logging and operator views.
 #[derive(Clone, PartialEq, Eq)]
 pub struct JobSummary {

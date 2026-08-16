@@ -472,6 +472,62 @@ impl fmt::Debug for RejectRequest {
     }
 }
 
+/// Provider metadata persisted on `extraction_attempts`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ExtractionMeta {
+    pub provider: String,
+    pub model: String,
+    pub profile_name: String,
+    pub prompt_version: String,
+    pub input_tokens: Option<i32>,
+    pub output_tokens: Option<i32>,
+}
+
+impl ExtractionMeta {
+    /// Metadata written by the in-process fake extractor.
+    pub fn fake() -> Self {
+        Self {
+            provider: "fake".to_string(),
+            model: "fake-corpus".to_string(),
+            profile_name: "receipt-fast".to_string(),
+            prompt_version: "v1".to_string(),
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+        }
+    }
+}
+
+impl fmt::Debug for ExtractionMeta {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtractionMeta")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("profile_name", &self.profile_name)
+            .field("prompt_version", &self.prompt_version)
+            .field("input_tokens", &self.input_tokens)
+            .field("output_tokens", &self.output_tokens)
+            .finish()
+    }
+}
+
+/// Extractor output: validated domain shape plus attempt metadata.
+#[derive(Clone, PartialEq)]
+pub struct ExtractedAttempt {
+    pub result: ExtractionResult,
+    pub meta: ExtractionMeta,
+}
+
+impl fmt::Debug for ExtractedAttempt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtractedAttempt")
+            .field("result", &self.result)
+            .field("meta", &self.meta)
+            .finish()
+    }
+}
+
 /// Deterministic extraction result from the fake extractor.
 #[derive(Clone, PartialEq)]
 pub struct ExtractionResult {
@@ -506,6 +562,8 @@ impl fmt::Debug for ExtractionResult {
 pub struct ReceiptConfig {
     pub original_receipt_days: u32,
     pub review_expiry_hours: i64,
+    pub extraction_enabled: bool,
+    pub monthly_extraction_pages: u64,
 }
 
 impl Default for ReceiptConfig {
@@ -513,6 +571,8 @@ impl Default for ReceiptConfig {
         Self {
             original_receipt_days: 7,
             review_expiry_hours: 72,
+            extraction_enabled: true,
+            monthly_extraction_pages: 80,
         }
     }
 }

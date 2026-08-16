@@ -10,7 +10,14 @@ pub enum IntentKind {
     Help,
     Privacy,
     Today,
+    Week,
+    Month,
     Recent,
+    Settings,
+    Timezone,
+    Schedule,
+    Export,
+    Delete,
     ManualEntry,
     EditAmount,
 }
@@ -22,6 +29,11 @@ pub struct Intent {
     pub currency: String,
     pub description: String,
     pub amount_text: String,
+    pub timezone: String,
+    pub schedule_frequency: String,
+    pub delivery_minute: i32,
+    pub disable_all_schedules: bool,
+    pub disable_schedule: bool,
 }
 
 pub fn parse_intent(text: &str, default_currency: &str) -> Intent {
@@ -35,6 +47,9 @@ pub fn parse_intent(text: &str, default_currency: &str) -> Intent {
         let body = f.trim_start_matches('/');
         if let Some(kind) = slash_command(body) {
             return Intent::of(kind);
+        }
+        if let Some(intent) = parse_parameterized_slash(&trimmed) {
+            return intent;
         }
         return Intent::none();
     }
@@ -82,9 +97,147 @@ pub fn is_explicit_slash_command(kind: IntentKind) -> bool {
         IntentKind::Start
             | IntentKind::Help
             | IntentKind::Today
+            | IntentKind::Week
+            | IntentKind::Month
             | IntentKind::Recent
             | IntentKind::Privacy
+            | IntentKind::Settings
+            | IntentKind::Timezone
+            | IntentKind::Schedule
+            | IntentKind::Export
+            | IntentKind::Delete
     )
+}
+
+fn parse_parameterized_slash(text: &str) -> Option<Intent> {
+    let trimmed = trim_command_punctuation(text);
+    let raw = trimmed.trim_start_matches('/');
+    let folded = fold(raw);
+    let raw_fields: Vec<&str> = raw.split_whitespace().collect();
+    let folded_fields: Vec<&str> = folded.split_whitespace().collect();
+    if folded_fields.is_empty() {
+        return None;
+    }
+
+    if matches_slash_name(folded_fields[0], &["tz", "timezone", "muigio"]) {
+        return parse_timezone_intent(&raw_fields, &folded_fields);
+    }
+    if matches_slash_name(folded_fields[0], &["settings", "caidat", "cai dat"]) {
+        return parse_settings_intent(&raw_fields, &folded_fields);
+    }
+    if matches_slash_name(folded_fields[0], &["sched", "tongket", "tong ket"]) {
+        return parse_schedule_intent(&raw_fields, &folded_fields);
+    }
+    None
+}
+
+fn matches_slash_name(folded: &str, names: &[&str]) -> bool {
+    names.contains(&folded)
+}
+
+fn parse_timezone_intent(raw_fields: &[&str], folded_fields: &[&str]) -> Option<Intent> {
+    let value_at = match folded_fields.len() {
+        2 if matches_slash_name(folded_fields[0], &["tz", "timezone", "muigio"]) => 1,
+        3 if folded_fields[0] == "mui" && folded_fields[1] == "gio" => 2,
+        _ => return None,
+    };
+    if value_at >= raw_fields.len() {
+        return None;
+    }
+    Some(Intent {
+        kind: IntentKind::Timezone,
+        timezone: raw_fields[value_at].to_string(),
+        ..Intent::empty_fields()
+    })
+}
+
+fn parse_settings_intent(raw_fields: &[&str], folded_fields: &[&str]) -> Option<Intent> {
+    if folded_fields.is_empty() {
+        return None;
+    }
+    if folded_fields.len() == 1 {
+        return Some(Intent::of(IntentKind::Settings));
+    }
+    let value_at = if (folded_fields[0] == "tz"
+        || folded_fields[0] == "timezone"
+        || folded_fields[0] == "muigio")
+        && folded_fields.len() == 2
+    {
+        1
+    } else if folded_fields.len() == 3 && folded_fields[0] == "mui" && folded_fields[1] == "gio" {
+        2
+    } else {
+        return None;
+    };
+    if value_at >= raw_fields.len() {
+        return None;
+    }
+    Some(Intent {
+        kind: IntentKind::Timezone,
+        timezone: raw_fields[value_at].to_string(),
+        ..Intent::empty_fields()
+    })
+}
+
+fn parse_schedule_intent(raw_fields: &[&str], folded_fields: &[&str]) -> Option<Intent> {
+    let (raw_fields, folded_fields) = if matches_slash_name(folded_fields[0], &["sched", "tongket"])
+    {
+        (&raw_fields[1..], &folded_fields[1..])
+    } else {
+        (raw_fields, folded_fields)
+    };
+
+    if folded_fields.is_empty() {
+        return Some(Intent::of(IntentKind::Schedule));
+    }
+    if matches_slash_name(folded_fields[0], &["off", "tat"]) {
+        let mut intent = Intent::of(IntentKind::Schedule);
+        if folded_fields.len() == 1
+            || (folded_fields.len() == 2 && matches_slash_name(folded_fields[1], &["all", "ca"]))
+        {
+            intent.disable_all_schedules = true;
+            return Some(intent);
+        }
+        if folded_fields.len() != 2 {
+            return None;
+        }
+        intent.schedule_frequency = parse_schedule_frequency(folded_fields[1])?;
+        intent.disable_schedule = true;
+        return Some(intent);
+    }
+    if folded_fields.len() != 2 {
+        return None;
+    }
+    let frequency = parse_schedule_frequency(folded_fields[0])?;
+    let minute = parse_delivery_minute(raw_fields[1])?;
+    Some(Intent {
+        kind: IntentKind::Schedule,
+        schedule_frequency: frequency,
+        delivery_minute: minute,
+        ..Intent::empty_fields()
+    })
+}
+
+fn parse_schedule_frequency(text: &str) -> Option<String> {
+    match text {
+        "daily" | "ngay" => Some("daily".to_string()),
+        "weekly" | "tuan" => Some("weekly".to_string()),
+        "monthly" | "thang" => Some("monthly".to_string()),
+        _ => None,
+    }
+}
+
+fn parse_delivery_minute(token: &str) -> Option<i32> {
+    let parts: Vec<&str> = token.split(':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let hour = parts[0].parse::<i32>().ok()?;
+    let minute = parts[1].parse::<i32>().ok()?;
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) {
+        return None;
+    }
+    Some(hour * 60 + minute)
 }
 
 fn slash_command(body: &str) -> Option<IntentKind> {
@@ -127,6 +280,11 @@ fn parse_edit_amount(text: &str, default_currency: &str) -> Option<Intent> {
         currency,
         description: String::new(),
         amount_text: amount_token.to_string(),
+        timezone: String::new(),
+        schedule_frequency: String::new(),
+        delivery_minute: 0,
+        disable_all_schedules: false,
+        disable_schedule: false,
     })
 }
 
@@ -171,6 +329,11 @@ fn manual_from_amount(token: &str, desc: &str, default_currency: &str) -> Option
         currency,
         description: desc,
         amount_text: token.to_string(),
+        timezone: String::new(),
+        schedule_frequency: String::new(),
+        delivery_minute: 0,
+        disable_all_schedules: false,
+        disable_schedule: false,
     })
 }
 
@@ -205,27 +368,34 @@ fn has_word(folded: &str, needle: &str) -> bool {
 
 impl Intent {
     fn none() -> Self {
-        Self {
-            kind: IntentKind::None,
-            amount_minor: 0,
-            currency: String::new(),
-            description: String::new(),
-            amount_text: String::new(),
-        }
+        Self::empty_fields_with(IntentKind::None)
     }
 
     fn of(kind: IntentKind) -> Self {
+        Self::empty_fields_with(kind)
+    }
+
+    fn empty_fields() -> Self {
+        Self::empty_fields_with(IntentKind::None)
+    }
+
+    fn empty_fields_with(kind: IntentKind) -> Self {
         Self {
             kind,
             amount_minor: 0,
             currency: String::new(),
             description: String::new(),
             amount_text: String::new(),
+            timezone: String::new(),
+            schedule_frequency: String::new(),
+            delivery_minute: 0,
+            disable_all_schedules: false,
+            disable_schedule: false,
         }
     }
 }
 
-const SLASH_COMMANDS: [(&str, IntentKind); 16] = [
+const SLASH_COMMANDS: [(&str, IntentKind); 24] = [
     ("start", IntentKind::Start),
     ("batdau", IntentKind::Start),
     ("xinchao", IntentKind::Start),
@@ -235,9 +405,17 @@ const SLASH_COMMANDS: [(&str, IntentKind); 16] = [
     ("consent", IntentKind::Privacy),
     ("today", IntentKind::Today),
     ("homnay", IntentKind::Today),
+    ("week", IntentKind::Week),
+    ("tuan", IntentKind::Week),
+    ("month", IntentKind::Month),
+    ("thang", IntentKind::Month),
     ("recent", IntentKind::Recent),
     ("history", IntentKind::Recent),
     ("ganday", IntentKind::Recent),
+    ("export", IntentKind::Export),
+    ("xuatdulieu", IntentKind::Export),
+    ("delete", IntentKind::Delete),
+    ("xoadulieu", IntentKind::Delete),
     ("ok", IntentKind::Confirm),
     ("y", IntentKind::Confirm),
     ("no", IntentKind::Discard),

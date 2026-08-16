@@ -20,7 +20,7 @@ use zl_expense::db::MIGRATOR;
 use zl_expense::error::ErrorClass;
 use zl_expense::health::ReadinessState;
 use zl_expense::http::{AppState, WebhookService, router};
-use zl_expense::ingress::store_with_receipt;
+use zl_expense::ingress::{IngressPolicy, store_with_receipt};
 use zl_expense::outbound::OutboundJobExecution;
 use zl_expense::provider::{
     InjectedMediaResolver, MediaDownloadPolicy, SECRET_HEADER, ZaloHttpAdapter, ZaloHttpConfig,
@@ -169,6 +169,7 @@ fn receipt_lifecycle(pool: PgPool) -> ReceiptLifecycle {
         ReceiptConfig {
             original_receipt_days: 7,
             review_expiry_hours: 72,
+            ..ReceiptConfig::default()
         },
     )
 }
@@ -244,7 +245,9 @@ impl VerticalHarness {
             pool.clone(),
             Arc::clone(&adapter),
             receipt,
+            IngressPolicy::default(),
             ZaloMediaDownloader::new(loopback_policy(media_server.addr.port()), resolver),
+            Arc::new(zl_expense::insight::FakeNarrator),
         );
 
         let webhook = Arc::new(WebhookService::new(
@@ -257,6 +260,8 @@ impl VerticalHarness {
             readiness: Arc::new(ReadinessState::new_ready()),
             pool: Some(pool.clone()),
             webhook: Some(webhook),
+            metrics: None,
+            metrics_enabled: false,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

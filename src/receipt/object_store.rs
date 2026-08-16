@@ -1,10 +1,24 @@
-//! In-memory receipt object store for Milestone 4.
+//! Receipt object store trait and in-memory implementation.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
 use super::error::ReceiptError;
+
+/// Validate an object key shared by filesystem and S3 backends.
+pub(crate) fn validate_object_key(key: &str) -> Result<(), ReceiptError> {
+    if key.trim().is_empty() {
+        return Err(ReceiptError::validation("object key must not be empty"));
+    }
+    if key.starts_with('/') {
+        return Err(ReceiptError::validation("object key must not be absolute"));
+    }
+    if key.contains('\\') || key.contains('\0') || key.contains("..") {
+        return Err(ReceiptError::validation("object key is invalid"));
+    }
+    Ok(())
+}
 
 /// Narrow object-store seam for receipt originals.
 pub trait ReceiptObjectStore: Send + Sync {
@@ -40,9 +54,7 @@ impl fmt::Debug for InMemoryObjectStore {
 
 impl ReceiptObjectStore for InMemoryObjectStore {
     fn put(&self, key: &str, bytes: &[u8]) -> Result<(), ReceiptError> {
-        if key.trim().is_empty() {
-            return Err(ReceiptError::validation("object key must not be empty"));
-        }
+        validate_object_key(key)?;
         let mut guard = self
             .objects
             .write()

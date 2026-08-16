@@ -78,7 +78,9 @@ run_shellcheck() {
     shellcheck -x \
         "${ROOT}/packaging/lib/package.sh" \
         "${ROOT}/scripts/package-dev.sh" \
-        "${ROOT}/scripts/test-package.sh"
+        "${ROOT}/scripts/test-package.sh" \
+        "${ROOT}/scripts/generate-sbom.sh" \
+        "${ROOT}/scripts/security-audit.sh"
 }
 
 build_packages() {
@@ -128,6 +130,10 @@ validate_archive_contents() {
             || fail 'deb missing migration'
         dpkg-deb -c "${deb_file}" | grep -q './lib/systemd/system/zl-expense.service' \
             || fail 'deb missing systemd unit'
+        dpkg-deb -c "${deb_file}" | grep -q './usr/share/zl-expense/deploy/caddy/Caddyfile' \
+            || fail 'deb missing Caddy profile'
+        dpkg-deb -c "${deb_file}" | grep -q './usr/share/doc/zl-expense/operator-runbook.md' \
+            || fail 'deb missing operator runbook'
 
         log "validating deb file modes"
         dpkg-deb -c "${deb_file}" | grep './usr/bin/zl-expense' | grep -q 'rwxr-xr-x' \
@@ -161,6 +167,12 @@ validate_archive_contents() {
     tar -tzf "${tar_file}" | grep -q \
         "${PACKAGE_NAME}-${PACKAGE_VERSION}-${DEB_ARCH}/systemd/zl-expense.service" \
         || fail 'tarball missing systemd unit'
+    tar -tzf "${tar_file}" | grep -q \
+        "${PACKAGE_NAME}-${PACKAGE_VERSION}-${DEB_ARCH}/deploy/caddy/Caddyfile" \
+        || fail 'tarball missing Caddy profile'
+    tar -tzf "${tar_file}" | grep -q \
+        "${PACKAGE_NAME}-${PACKAGE_VERSION}-${DEB_ARCH}/doc/operator-runbook.md" \
+        || fail 'tarball missing operator runbook'
 }
 
 validate_systemd_unit() {
@@ -171,10 +183,14 @@ validate_systemd_unit() {
     if command -v systemd-analyze >/dev/null 2>&1; then
         systemd-analyze verify "${unit_path}"
     else
-        grep -q '^Type=simple' "${unit_path}" || fail 'expected Type=simple for M1'
+        grep -q '^Type=notify' "${unit_path}" || fail 'expected Type=notify'
+        grep -q '^NotifyAccess=main' "${unit_path}" || fail 'missing NotifyAccess=main'
+        grep -q '^WatchdogSec=30s' "${unit_path}" || fail 'missing WatchdogSec=30s'
         grep -q '^User=zl-expense' "${unit_path}" || fail 'missing User=zl-expense'
         grep -q '^TimeoutStopSec=30s' "${unit_path}" || fail 'missing TimeoutStopSec=30s'
         grep -q '^NoNewPrivileges=true' "${unit_path}" || fail 'missing NoNewPrivileges'
+        grep -q '^MemoryMax=384M' "${unit_path}" || fail 'missing MemoryMax=384M'
+        grep -q '^TasksMax=256' "${unit_path}" || fail 'missing TasksMax=256'
     fi
 }
 

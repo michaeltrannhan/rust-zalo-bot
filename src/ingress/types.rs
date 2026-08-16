@@ -160,6 +160,14 @@ pub struct RecentExpense {
     pub version: i32,
 }
 
+/// Enabled or disabled summary schedule row for settings display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryScheduleSnapshot {
+    pub frequency: String,
+    pub delivery_minute: i32,
+    pub enabled: bool,
+}
+
 /// Account and conversation context passed to the synchronous decision callback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionContext {
@@ -171,6 +179,14 @@ pub struct DecisionContext {
     pub confirmed_today_total_minor: i64,
     pub confirmed_today_count: u32,
     pub today_currency: String,
+    pub week_total_minor: i64,
+    pub week_tx_count: u32,
+    pub week_currency: String,
+    pub month_total_minor: i64,
+    pub month_tx_count: u32,
+    pub month_currency: String,
+    pub default_currency: String,
+    pub schedules: Vec<SummaryScheduleSnapshot>,
     pub recent_expenses: Vec<RecentExpense>,
     pub sender_allowed: bool,
     pub user_text: String,
@@ -179,6 +195,8 @@ pub struct DecisionContext {
     pub next_expense_id: Uuid,
     pub next_submission_id: Uuid,
     pub next_ingest_job_id: Uuid,
+    pub remaining_daily_receipts: i64,
+    pub confirmed_expense_count: u32,
     pub now: DateTime<Utc>,
 }
 

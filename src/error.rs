@@ -123,6 +123,22 @@ impl AppError {
         Self::new(ErrorClass::Internal, message)
     }
 
+    pub fn preflight(message: impl Into<String>) -> Self {
+        Self::new(ErrorClass::PreflightFailed, message)
+    }
+
+    pub fn health(message: impl Into<String>) -> Self {
+        Self::new(ErrorClass::HealthFailed, message)
+    }
+
+    pub fn permission(message: impl Into<String>) -> Self {
+        Self::new(ErrorClass::Permission, message)
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(ErrorClass::Conflict, message)
+    }
+
     pub fn exit_code(&self) -> ExitCode {
         match self.class {
             ErrorClass::Config => ExitCode::ConfigError,

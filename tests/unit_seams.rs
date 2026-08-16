@@ -248,3 +248,86 @@ fn credential_reader_returns_value_without_exposing_it_on_failure() {
             .contains(cred_dir.to_str().expect("path"))
     );
 }
+
+#[test]
+fn thinking_effort_rejected_for_unsupported_model() {
+    let _guard = env_test_lock();
+    unsafe {
+        std::env::remove_var("TEST_DATABASE_URL");
+        std::env::remove_var("ZL_EXPENSE_DATABASE_URL");
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cred_dir = dir.path().join("credentials");
+    std::fs::create_dir_all(&cred_dir).expect("cred dir");
+    std::fs::write(cred_dir.join("database"), "postgres://localhost/test").expect("database");
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[credentials]
+directory = "{}"
+
+[extraction]
+backend = "gemini"
+default_profile = "receipt-fast"
+
+[[ai.profiles]]
+name = "receipt-fast"
+provider = "gemini"
+model = "gemini-1.5-flash"
+credential = "gemini-receipt-fast"
+task = "extraction"
+thinking_effort = "high"
+"#,
+            cred_dir.display()
+        ),
+    )
+    .expect("config");
+
+    let err = load_config(Some(&config_path)).expect_err("unsupported thinking");
+    assert_eq!(err.class, zl_expense::error::ErrorClass::Config);
+    assert!(err.message.contains("thinking_effort"));
+}
+
+#[test]
+fn thinking_effort_accepted_for_gemini_25() {
+    let _guard = env_test_lock();
+    unsafe {
+        std::env::remove_var("TEST_DATABASE_URL");
+        std::env::remove_var("ZL_EXPENSE_DATABASE_URL");
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cred_dir = dir.path().join("credentials");
+    std::fs::create_dir_all(&cred_dir).expect("cred dir");
+    std::fs::write(cred_dir.join("database"), "postgres://localhost/test").expect("database");
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[credentials]
+directory = "{}"
+
+[extraction]
+backend = "fake"
+default_profile = "receipt-fast"
+
+[[ai.profiles]]
+name = "receipt-fast"
+provider = "gemini"
+model = "gemini-2.5-flash"
+credential = "gemini-receipt-fast"
+task = "extraction"
+thinking_effort = "high"
+"#,
+            cred_dir.display()
+        ),
+    )
+    .expect("config");
+
+    let resolved = load_config(Some(&config_path)).expect("load");
+    assert_eq!(resolved.ai_profiles[0].thinking_effort, "high");
+}

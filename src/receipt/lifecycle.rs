@@ -8,6 +8,10 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::error::ErrorClass;
+use crate::quota::{
+    GLOBAL_SCOPE_ID, METRIC_EXTRACTION_PAGES, SCOPE_GLOBAL, increment_in_transaction,
+    monthly_period_key,
+};
 use crate::work::{EnqueueOutcome, EnqueueRequest, WorkStore};
 
 use super::error::ReceiptError;
@@ -64,6 +68,10 @@ impl ReceiptLifecycle {
         self.config
     }
 
+    pub fn object_store(&self) -> Arc<dyn ReceiptObjectStore> {
+        Arc::clone(&self.object_store)
+    }
+
     pub async fn accept_submission(
         &self,
         request: AcceptSubmissionRequest,
@@ -82,6 +90,9 @@ impl ReceiptLifecycle {
         tx: &mut Transaction<'_, Postgres>,
         request: AcceptSubmissionRequest,
     ) -> Result<AcceptSubmissionOutcome, ReceiptError> {
+        if !account_is_active_in_tx(tx, request.account_id).await? {
+            return Err(ReceiptError::conflict("account is not active"));
+        }
         let inserted = insert_submission(
             tx,
             request.submission_id,
@@ -361,6 +372,11 @@ impl ReceiptLifecycle {
         mime_type: &str,
         extract_job_id: Uuid,
     ) -> Result<IngestOutcome, ReceiptError> {
+        if !account_is_active(&self.pool, account_id).await? {
+            return Ok(IngestOutcome::AlreadyTerminal {
+                state: ReceiptState::Deleted,
+            });
+        }
         let row = load_submission(&self.pool, submission_id, account_id).await?;
         let has_asset = load_asset(&self.pool, submission_id, account_id)
             .await?
@@ -534,13 +550,66 @@ impl ReceiptLifecycle {
             ExtractClaim::Proceed => {}
         }
 
+        if !account_is_active(&self.pool, account_id).await? {
+            return Ok(ExtractOutcome::AlreadyTerminal {
+                state: ReceiptState::Deleted,
+            });
+        }
+
+        if !self.config.extraction_enabled {
+            self.persist_extraction_failure(
+                account_id,
+                submission_id,
+                "failed",
+                ErrorClass::KillSwitch,
+                ReceiptState::FailedPermanent,
+                0,
+                &self.extractor.meta(),
+            )
+            .await?;
+            return Err(ReceiptError::kill_switch("extraction is disabled"));
+        }
+
+        let limit = i64::try_from(self.config.monthly_extraction_pages).unwrap_or(i64::MAX);
+        let period = monthly_period_key(Utc::now());
+        let mut quota_tx = self.begin_tx().await?;
+        let quota = increment_in_transaction(
+            &mut quota_tx,
+            SCOPE_GLOBAL,
+            GLOBAL_SCOPE_ID,
+            &period,
+            METRIC_EXTRACTION_PAGES,
+            limit,
+        )
+        .await
+        .map_err(|_| dependency("quota increment failed"))?;
+        quota_tx
+            .commit()
+            .await
+            .map_err(|_| dependency("quota commit failed"))?;
+        if quota.exceeded() {
+            self.persist_extraction_failure(
+                account_id,
+                submission_id,
+                "failed",
+                ErrorClass::QuotaExceeded,
+                ReceiptState::FailedPermanent,
+                0,
+                &self.extractor.meta(),
+            )
+            .await?;
+            return Err(ReceiptError::quota_exceeded(
+                "monthly extraction quota exceeded",
+            ));
+        }
+
         let started = Instant::now();
         let extracted = self.read_and_extract(account_id, submission_id).await;
         let latency_ms =
             i32::try_from(started.elapsed().as_millis().min(i64::MAX as u128)).unwrap_or(i32::MAX);
 
         match extracted {
-            Ok(extraction) if extraction.unsupported => {
+            Ok(attempt) if attempt.result.unsupported => {
                 self.persist_extraction_failure(
                     account_id,
                     submission_id,
@@ -548,13 +617,20 @@ impl ReceiptLifecycle {
                     ErrorClass::Unsupported,
                     ReceiptState::FailedPermanent,
                     latency_ms,
+                    &attempt.meta,
                 )
                 .await?;
                 Ok(ExtractOutcome::Unsupported)
             }
-            Ok(extraction) => {
-                self.persist_extraction_success(account_id, submission_id, extraction, latency_ms)
-                    .await
+            Ok(attempt) => {
+                self.persist_extraction_success(
+                    account_id,
+                    submission_id,
+                    attempt.result,
+                    latency_ms,
+                    &attempt.meta,
+                )
+                .await
             }
             Err(error) => {
                 let terminal = failure_state_for(error.class);
@@ -565,6 +641,7 @@ impl ReceiptLifecycle {
                     error.class,
                     terminal,
                     latency_ms,
+                    &self.extractor.meta(),
                 )
                 .await?;
                 Err(error)
@@ -621,7 +698,7 @@ impl ReceiptLifecycle {
         &self,
         account_id: Uuid,
         submission_id: Uuid,
-    ) -> Result<super::types::ExtractionResult, ReceiptError> {
+    ) -> Result<super::types::ExtractedAttempt, ReceiptError> {
         let asset = load_asset(&self.pool, submission_id, account_id)
             .await?
             .ok_or_else(|| ReceiptError::not_found("receipt asset not found"))?;
@@ -638,6 +715,7 @@ impl ReceiptLifecycle {
         submission_id: Uuid,
         extraction: super::types::ExtractionResult,
         latency_ms: i32,
+        meta: &super::types::ExtractionMeta,
     ) -> Result<ExtractOutcome, ReceiptError> {
         let draft_id = Uuid::new_v4();
         let mut tx = self.begin_tx().await?;
@@ -666,6 +744,7 @@ impl ReceiptLifecycle {
             "success",
             None,
             latency_ms,
+            meta,
         )
         .await?;
         upsert_draft(&mut tx, draft_id, submission_id, account_id, &extraction).await?;
@@ -688,6 +767,7 @@ impl ReceiptLifecycle {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn persist_extraction_failure(
         &self,
         account_id: Uuid,
@@ -696,6 +776,7 @@ impl ReceiptLifecycle {
         error_class: ErrorClass,
         terminal_state: ReceiptState,
         latency_ms: i32,
+        meta: &super::types::ExtractionMeta,
     ) -> Result<(), ReceiptError> {
         let mut tx = self.begin_tx().await?;
         let current = load_submission_for_update(&mut tx, submission_id, account_id).await?;
@@ -710,6 +791,7 @@ impl ReceiptLifecycle {
             outcome,
             Some(error_class.as_str()),
             latency_ms,
+            meta,
         )
         .await?;
         transition_state(
@@ -1450,6 +1532,7 @@ async fn record_extraction_attempt(
     outcome: &str,
     error_class: Option<&str>,
     latency_ms: i32,
+    meta: &super::types::ExtractionMeta,
 ) -> Result<(), ReceiptError> {
     sqlx::query(
         r#"
@@ -1458,16 +1541,22 @@ async fn record_extraction_attempt(
             prompt_version, outcome, error_class, latency_ms, input_tokens,
             output_tokens, started_at, ended_at
         )
-        VALUES ($1, $2, $3, 'fake', 'fake-corpus', 'receipt-fast', 'v1', $4, $5, $6, 0, 0, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
         ON CONFLICT (submission_id, attempt_number) DO NOTHING
         "#,
     )
     .bind(Uuid::new_v4())
     .bind(submission_id)
     .bind(attempt_number)
+    .bind(&meta.provider)
+    .bind(&meta.model)
+    .bind(&meta.profile_name)
+    .bind(&meta.prompt_version)
     .bind(outcome)
     .bind(error_class)
     .bind(latency_ms)
+    .bind(meta.input_tokens)
+    .bind(meta.output_tokens)
     .execute(&mut **tx)
     .await
     .map_err(|_| dependency("extraction attempt insert failed"))?;
@@ -1785,6 +1874,29 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
         error,
         sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("23505")
     )
+}
+
+async fn account_is_active(pool: &PgPool, account_id: Uuid) -> Result<bool, ReceiptError> {
+    let state: Option<String> =
+        sqlx::query_scalar("SELECT lifecycle_state FROM accounts WHERE id = $1")
+            .bind(account_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| dependency("account lookup failed"))?;
+    Ok(matches!(state.as_deref(), Some("active")))
+}
+
+async fn account_is_active_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+) -> Result<bool, ReceiptError> {
+    let state: Option<String> =
+        sqlx::query_scalar("SELECT lifecycle_state FROM accounts WHERE id = $1")
+            .bind(account_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|_| dependency("account lookup failed"))?;
+    Ok(matches!(state.as_deref(), Some("active")))
 }
 
 fn dependency(message: &str) -> ReceiptError {

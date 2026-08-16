@@ -1,11 +1,15 @@
 //! Supervised Tokio runtime with role-based task supervision.
 
 mod jobs;
+mod maintenance;
 mod roles;
+mod scheduler;
 mod shutdown;
 
 pub use jobs::{JobDeps, dispatch_leased_job};
+pub use maintenance::maintenance_tick;
 pub use roles::{Role, RuntimeOptions, all_roles, parse_roles};
+pub use scheduler::scheduler_tick;
 pub use shutdown::ShutdownSignal;
 
 use std::collections::HashMap;
@@ -22,10 +26,11 @@ use crate::db::{check_connection, check_migrations_current, create_pool, migrate
 use crate::error::{AppError, ExitCode};
 use crate::health::ReadinessState;
 use crate::http::{AppState, WebhookService, router};
-use crate::ingress::store_with_receipt;
+use crate::ingress::{IngressPolicy, store_with_receipt_and_policy};
+use crate::metrics::Metrics;
 use crate::outbound::OutboundJobExecution;
 use crate::provider::{ZaloHttpAdapter, ZaloHttpConfig};
-use crate::receipt::{InMemoryObjectStore, ReceiptConfig, ReceiptLifecycle};
+use crate::receipt::{ReceiptConfig, ReceiptLifecycle, build_extractor, build_object_store};
 use crate::work::{ClaimOptions, ClaimedJob, WorkStore};
 
 const CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -85,22 +90,41 @@ pub async fn run(config: ResolvedConfig, options: RuntimeOptions) -> ExitCode {
         None
     };
 
-    let receipt_lifecycle = ReceiptLifecycle::new(
+    let object_store = match build_object_store(&config) {
+        Ok(store) => store,
+        Err(error) => return error.exit_code(),
+    };
+    let extractor = match build_extractor(&config) {
+        Ok(extractor) => extractor,
+        Err(error) => return error.exit_code(),
+    };
+
+    let ingress_policy = IngressPolicy::from_config(&config);
+    let receipt_lifecycle = ReceiptLifecycle::with_extractor(
         pool.clone(),
-        InMemoryObjectStore::new(),
+        object_store,
+        extractor,
         ReceiptConfig {
             original_receipt_days: config.original_receipt_days,
             review_expiry_hours: ReceiptConfig::default().review_expiry_hours,
+            extraction_enabled: config.extraction_enabled,
+            monthly_extraction_pages: config.monthly_extraction_pages,
         },
     );
 
     let webhook = if roles.contains(&Role::Ingress) {
         Some(Arc::new(WebhookService::new(
             Arc::clone(zalo_adapter.as_ref().expect("adapter initialized")),
-            store_with_receipt(pool.clone(), receipt_lifecycle.clone()),
+            store_with_receipt_and_policy(pool.clone(), receipt_lifecycle.clone(), ingress_policy),
             config.allowed_provider_sender_ids.clone(),
             config.webhook_max_body_bytes,
         )))
+    } else {
+        None
+    };
+
+    let metrics = if config.metrics_enabled {
+        Some(Metrics::new())
     } else {
         None
     };
@@ -109,12 +133,16 @@ pub async fn run(config: ResolvedConfig, options: RuntimeOptions) -> ExitCode {
         readiness: Arc::clone(&readiness),
         pool: Some(pool.clone()),
         webhook,
+        metrics: metrics.clone(),
+        metrics_enabled: config.metrics_enabled,
     };
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let shutdown_signal = ShutdownSignal::new(shutdown_tx.clone(), Arc::clone(&readiness));
 
     info!(roles = ?roles, "starting supervised runtime");
+
+    spawn_systemd_watchdog();
 
     let mut role_tasks: HashMap<&'static str, JoinHandle<RoleResult>> = HashMap::new();
 
@@ -129,6 +157,7 @@ pub async fn run(config: ResolvedConfig, options: RuntimeOptions) -> ExitCode {
                     .await
                     .map_err(|e| AppError::internal(format!("failed to bind {}: {}", listen, e)))?;
                 info!(address = %listen, "http server listening");
+                notify_systemd_ready();
                 axum::serve(listener, router)
                     .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
                     .await
@@ -141,7 +170,8 @@ pub async fn run(config: ResolvedConfig, options: RuntimeOptions) -> ExitCode {
         let job_deps = Arc::new(jobs::JobDeps::production(
             pool.clone(),
             Arc::clone(zalo_adapter.as_ref().expect("adapter initialized")),
-            receipt_lifecycle,
+            receipt_lifecycle.clone(),
+            ingress_policy,
         ));
         role_tasks.insert(
             "worker",
@@ -156,20 +186,38 @@ pub async fn run(config: ResolvedConfig, options: RuntimeOptions) -> ExitCode {
     }
 
     if roles.contains(&Role::Scheduler) {
+        let pool_scheduler = pool.clone();
+        let shutdown_scheduler = shutdown_rx.clone();
         role_tasks.insert(
             "scheduler",
-            role_idle_task(Role::Scheduler, shutdown_rx.clone()),
+            tokio::spawn(async move {
+                scheduler::run_scheduler_role(pool_scheduler, shutdown_scheduler).await
+            }),
         );
     }
 
     if roles.contains(&Role::Maintenance) {
+        let pool_maintenance = pool.clone();
+        let receipt_maintenance = receipt_lifecycle.clone();
+        let shutdown_maintenance = shutdown_rx.clone();
         role_tasks.insert(
             "maintenance",
-            role_idle_task(Role::Maintenance, shutdown_rx.clone()),
+            tokio::spawn(async move {
+                maintenance::run_maintenance_role(
+                    pool_maintenance,
+                    receipt_maintenance,
+                    shutdown_maintenance,
+                )
+                .await
+            }),
         );
     }
 
     let mut shutdown_listener = tokio::spawn(shutdown_signal.listen());
+
+    if !roles.contains(&Role::Ingress) {
+        notify_systemd_ready();
+    }
 
     let critical_failure = tokio::select! {
         result = &mut shutdown_listener => {
@@ -537,19 +585,6 @@ async fn drain_role_tasks(
     }
 }
 
-fn role_idle_task(role: Role, mut shutdown_rx: watch::Receiver<bool>) -> JoinHandle<RoleResult> {
-    tokio::spawn(async move {
-        info!(role = role.as_str(), "role task started");
-        while !*shutdown_rx.borrow() {
-            if shutdown_rx.changed().await.is_err() {
-                break;
-            }
-        }
-        info!(role = role.as_str(), "role task stopped");
-        Ok(())
-    })
-}
-
 fn valid_runtime_secret(value: &str) -> bool {
     value.len() >= 16 && value != "dev-secret-change-me" && value != "change-me"
 }
@@ -560,4 +595,19 @@ async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
             break;
         }
     }
+}
+
+fn notify_systemd_ready() {
+    // Keep NOTIFY_SOCKET so watchdog pings continue after READY.
+    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
+}
+
+fn spawn_systemd_watchdog() {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            interval.tick().await;
+            let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog]);
+        }
+    });
 }

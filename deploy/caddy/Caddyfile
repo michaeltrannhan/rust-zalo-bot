@@ -1,0 +1,9 @@
+# TLS reverse proxy for zl-expense (loopback upstream only).
+# Request bodies are not logged by default in Caddy access logs when disabled.
+
+expense.example.com {
+    reverse_proxy 127.0.0.1:8080
+    log {
+        output discard
+    }
+}

@@ -534,8 +534,12 @@ impl ReceiptExtractor for ForcedFailureExtractor {
     fn extract(
         &self,
         _bytes: &[u8],
-    ) -> Result<zl_expense::receipt::ExtractionResult, ReceiptError> {
+    ) -> Result<zl_expense::receipt::ExtractedAttempt, ReceiptError> {
         Err(self.error.clone())
+    }
+
+    fn meta(&self) -> zl_expense::receipt::ExtractionMeta {
+        zl_expense::receipt::ExtractionMeta::fake()
     }
 }
 
@@ -836,6 +840,77 @@ async fn extract_retries_failed_transient_via_extracting() {
         ReceiptState::ReviewRequired,
     )
     .await;
+}
+
+#[tokio::test]
+async fn extract_persists_extractor_attempt_metadata() {
+    let _guard = integration_lock();
+    let Some(_) = skip_without_database("extract_persists_extractor_attempt_metadata") else {
+        return;
+    };
+
+    struct MetaExtractor;
+
+    impl ReceiptExtractor for MetaExtractor {
+        fn extract(
+            &self,
+            bytes: &[u8],
+        ) -> Result<zl_expense::receipt::ExtractedAttempt, ReceiptError> {
+            Ok(zl_expense::receipt::ExtractedAttempt {
+                result: zl_expense::receipt::extract(bytes)?,
+                meta: self.meta(),
+            })
+        }
+
+        fn meta(&self) -> zl_expense::receipt::ExtractionMeta {
+            zl_expense::receipt::ExtractionMeta {
+                provider: "gemini".to_string(),
+                model: "gemini-2.5-flash".to_string(),
+                profile_name: "receipt-fast".to_string(),
+                prompt_version: "extraction-json-v1".to_string(),
+                input_tokens: Some(11),
+                output_tokens: Some(22),
+            }
+        }
+    }
+
+    let pool = receipt_fresh_pool().await;
+    let account_id = seed_active_account(&pool).await;
+    let lifecycle = ReceiptLifecycle::with_extractor(
+        pool.clone(),
+        InMemoryObjectStore::new(),
+        Arc::new(MetaExtractor),
+        ReceiptConfig::default(),
+    );
+    let submission_id = Uuid::new_v4();
+    accept_and_ingest(&lifecycle, account_id, submission_id, &corpus_png(0)).await;
+    lifecycle
+        .extract(account_id, submission_id)
+        .await
+        .expect("extract");
+
+    let row: (String, String, String, String, Option<i32>, Option<i32>) = sqlx::query_as(
+        r#"
+        SELECT provider, model, profile_name, prompt_version, input_tokens, output_tokens
+        FROM extraction_attempts
+        WHERE submission_id = $1
+        "#,
+    )
+    .bind(submission_id)
+    .fetch_one(lifecycle.pool())
+    .await
+    .expect("attempt");
+    assert_eq!(
+        row,
+        (
+            "gemini".to_string(),
+            "gemini-2.5-flash".to_string(),
+            "receipt-fast".to_string(),
+            "extraction-json-v1".to_string(),
+            Some(11),
+            Some(22)
+        )
+    );
 }
 
 #[tokio::test]

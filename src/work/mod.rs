@@ -8,5 +8,6 @@ pub use error::WorkError;
 pub use store::WorkStore;
 pub use types::{
     AttemptOutcome, AttemptSummary, ClaimOptions, ClaimedJob, EnqueueOutcome, EnqueueRequest,
-    FailOutcome, JobState, JobSummary, VersionedPayload, is_retryable, retry_delay_secs,
+    FailOutcome, JobListRow, JobState, JobSummary, VersionedPayload, is_retryable,
+    retry_delay_secs,
 };

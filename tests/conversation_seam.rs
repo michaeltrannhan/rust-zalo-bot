@@ -19,8 +19,13 @@ fn active_ctx(account_id: Uuid) -> AccountContext {
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
         original_receipt_retention_days: 7,
+        remaining_daily_receipts: 20,
+        confirmed_expense_count: 0,
         pending: None,
         today_summary: None,
+        week_summary: None,
+        month_summary: None,
+        schedules: vec![],
         recent_lines: vec![],
     }
 }
@@ -35,8 +40,13 @@ fn pending_consent_ctx(account_id: Uuid) -> AccountContext {
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
         original_receipt_retention_days: 7,
+        remaining_daily_receipts: 20,
+        confirmed_expense_count: 0,
         pending: None,
         today_summary: None,
+        week_summary: None,
+        month_summary: None,
+        schedules: vec![],
         recent_lines: vec![],
     }
 }
@@ -78,8 +88,13 @@ fn allowlist_denial_is_deterministic() {
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
         original_receipt_retention_days: 7,
+        remaining_daily_receipts: 20,
+        confirmed_expense_count: 0,
         pending: None,
         today_summary: None,
+        week_summary: None,
+        month_summary: None,
+        schedules: vec![],
         recent_lines: vec![],
     };
     let outcome = decide(&ctx, "/help", Utc::now());
@@ -157,6 +172,8 @@ fn slash_today_aliases_are_diacritics_insensitive() {
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
         original_receipt_retention_days: 7,
+        remaining_daily_receipts: 20,
+        confirmed_expense_count: 0,
         pending: None,
         today_summary: Some(PeriodSummary {
             label: "Hôm nay".to_string(),
@@ -164,6 +181,9 @@ fn slash_today_aliases_are_diacritics_insensitive() {
             total_minor: 325000,
             tx_count: 2,
         }),
+        week_summary: None,
+        month_summary: None,
+        schedules: vec![],
         recent_lines: vec![],
     };
     let now = Utc.with_ymd_and_hms(2026, 8, 15, 10, 0, 0).unwrap();
@@ -186,8 +206,13 @@ fn slash_recent_and_history_aliases_match() {
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
         original_receipt_retention_days: 7,
+        remaining_daily_receipts: 20,
+        confirmed_expense_count: 0,
         pending: None,
         today_summary: None,
+        week_summary: None,
+        month_summary: None,
+        schedules: vec![],
         recent_lines: vec![RecentExpenseLine {
             date_display: "14/08".to_string(),
             amount_minor: 45000,
@@ -405,7 +430,12 @@ fn explicit_slash_command_bypasses_pending_resolution() {
 
     let outcome = decide(&ctx, "/today", now);
     assert!(first_reply(&outcome).contains("100.000 ₫"));
-    assert!(outcome.commands.is_empty());
+    assert_eq!(
+        outcome.commands,
+        vec![DomainCommand::RecordInsightSnapshot {
+            period_kind: "day".to_string(),
+        }]
+    );
 }
 
 #[test]
@@ -427,9 +457,138 @@ fn bare_command_does_not_bypass_pending_resolution() {
 }
 
 #[test]
+fn decide_image_at_daily_quota_returns_vietnamese_limit_copy() {
+    use zl_expense::conversation::{daily_receipt_quota_text, decide_image};
+    let mut ctx = active_ctx(Uuid::new_v4());
+    ctx.remaining_daily_receipts = 0;
+    let outcome = decide_image(&ctx, Utc::now());
+    assert_eq!(first_reply(&outcome), daily_receipt_quota_text());
+    assert!(outcome.commands.is_empty());
+}
+
+#[test]
 fn formatting_handles_minimum_signed_value() {
     assert_eq!(
         format_minor(i64::MIN, "VND"),
         "-9.223.372.036.854.775.808 ₫"
     );
+}
+
+#[test]
+fn slash_week_renders_week_summary() {
+    let mut ctx = active_ctx(Uuid::new_v4());
+    ctx.week_summary = Some(PeriodSummary {
+        label: "Tuần này".to_string(),
+        currency: "VND".to_string(),
+        total_minor: 120000,
+        tx_count: 1,
+    });
+    let outcome = decide(&ctx, "/week", Utc::now());
+    assert!(first_reply(&outcome).contains("120.000 ₫"));
+}
+
+#[test]
+fn slash_tz_valid_issues_set_timezone_command() {
+    let ctx = active_ctx(Uuid::new_v4());
+    let outcome = decide(&ctx, "/tz Asia/Bangkok", Utc::now());
+    assert_eq!(
+        outcome.commands,
+        vec![DomainCommand::SetTimezone {
+            iana: "Asia/Bangkok".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn slash_sched_set_issues_upsert_schedule_command() {
+    let ctx = active_ctx(Uuid::new_v4());
+    let outcome = decide(&ctx, "/sched daily 20:00", Utc::now());
+    assert_eq!(
+        outcome.commands,
+        vec![DomainCommand::UpsertSchedule {
+            frequency: "daily".to_string(),
+            delivery_minute: 20 * 60,
+        }]
+    );
+}
+
+#[test]
+fn slash_sched_midnight_is_upsert_not_disable() {
+    let ctx = active_ctx(Uuid::new_v4());
+    let outcome = decide(&ctx, "/sched daily 00:00", Utc::now());
+    assert_eq!(
+        outcome.commands,
+        vec![DomainCommand::UpsertSchedule {
+            frequency: "daily".to_string(),
+            delivery_minute: 0,
+        }]
+    );
+}
+
+#[test]
+fn slash_sched_off_daily_disables_frequency() {
+    let ctx = active_ctx(Uuid::new_v4());
+    let outcome = decide(&ctx, "/sched off daily", Utc::now());
+    assert_eq!(
+        outcome.commands,
+        vec![DomainCommand::DisableSchedule {
+            frequency: Some("daily".to_string()),
+        }]
+    );
+}
+
+#[test]
+fn slash_delete_arms_two_step_confirmation_with_counts_only() {
+    let mut ctx = active_ctx(Uuid::new_v4());
+    ctx.confirmed_expense_count = 3;
+    let now = Utc::now();
+    let outcome = decide(&ctx, "/delete", now);
+    assert!(first_reply(&outcome).contains("3 khoản chi"));
+    assert!(!first_reply(&outcome).contains("cafe"));
+    assert!(matches!(
+        outcome.commands.as_slice(),
+        [DomainCommand::RequestAccountDeletion { .. }]
+    ));
+}
+
+#[test]
+fn pending_delete_ok_confirms_without_content_in_reply() {
+    let mut ctx = active_ctx(Uuid::new_v4());
+    ctx.confirmed_expense_count = 2;
+    ctx.pending = Some(PendingConfirmation {
+        kind: PendingKind::AccountDeletion,
+        reference_id: ctx.next_expense_id,
+        optimistic_version: 1,
+        expires_at: Utc::now() + Duration::minutes(10),
+        draft: ManualDraftView {
+            version: 1,
+            amount_minor: 0,
+            currency: "VND".to_string(),
+            merchant: "secret-merchant".to_string(),
+            category_display: String::new(),
+            type_label: String::new(),
+            date_display: String::new(),
+        },
+    });
+    let outcome = decide(&ctx, "ok", Utc::now());
+    assert_eq!(
+        outcome.commands,
+        vec![DomainCommand::ConfirmAccountDeletion]
+    );
+    let body = first_reply(&outcome);
+    assert!(body.contains("2 khoản chi"));
+    assert!(!body.contains("secret-merchant"));
+}
+
+#[test]
+fn slash_export_never_mentions_filesystem_paths() {
+    let ctx = active_ctx(Uuid::new_v4());
+    let outcome = decide(&ctx, "/export", Utc::now());
+    assert_eq!(outcome.commands, vec![DomainCommand::RequestAccountExport]);
+    let body = first_reply(&outcome);
+    assert!(!body.contains("/var/"));
+    assert!(!body.contains("s3://"));
+    assert!(!body.contains(".json"));
+    assert!(!body.contains(".csv"));
+    assert!(!body.contains("exports/"));
 }

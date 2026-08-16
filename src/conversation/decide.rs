@@ -1,15 +1,19 @@
 use super::money::format_minor;
 use super::parse::{IntentKind, is_explicit_slash_command, parse_intent};
 use super::templates::{
-    confirmed_text, consent_card_text, default_category_display, default_type_label,
-    discarded_text, empty_summary_text, help_text, image_received_text, manual_confirmation_card,
-    not_allowed_text, pending_expired_text, privacy_text, recent_text, suspended_text,
+    confirmed_text, consent_card_text, daily_receipt_quota_text, default_category_display,
+    default_type_label, delete_accepted_text, delete_cancelled_text, delete_confirm_text,
+    discarded_text, empty_summary_text, export_accepted_text, help_text, image_received_text,
+    invalid_settings_text, invalid_timezone_text, manual_confirmation_card, not_allowed_text,
+    pending_expired_text, privacy_text, recent_text, schedule_disabled_text, schedule_invalid_text,
+    schedule_set_text, schedule_text, settings_text, settings_updated_text, suspended_text,
     today_summary_text, unknown_text, welcome_text,
 };
 use super::types::{
     AccountContext, CONSENT_VERSION, ConversationOutcome, DomainCommand, LifecycleState,
     PENDING_CONFIRMATION_TTL_SECS, PendingConfirmation, PendingKind, ReplyPlan,
 };
+use crate::schedule::{parse_timezone, validate_delivery_minute};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
@@ -50,13 +54,21 @@ pub fn decide_image(ctx: &AccountContext, _now: DateTime<Utc>) -> ConversationOu
             replies: vec![ReplyPlan::single(consent_card_text())],
             commands: vec![],
         },
-        LifecycleState::Active => ConversationOutcome {
-            replies: vec![ReplyPlan::single(image_received_text())],
-            commands: vec![DomainCommand::AcceptReceiptSubmission {
-                submission_id: ctx.next_submission_id,
-                ingest_job_id: ctx.next_ingest_job_id,
-            }],
-        },
+        LifecycleState::Active => {
+            if ctx.remaining_daily_receipts <= 0 {
+                return ConversationOutcome {
+                    replies: vec![ReplyPlan::single(daily_receipt_quota_text())],
+                    commands: vec![],
+                };
+            }
+            ConversationOutcome {
+                replies: vec![ReplyPlan::single(image_received_text())],
+                commands: vec![DomainCommand::AcceptReceiptSubmission {
+                    submission_id: ctx.next_submission_id,
+                    ingest_job_id: ctx.next_ingest_job_id,
+                }],
+            }
+        }
     }
 }
 
@@ -93,7 +105,14 @@ fn handle_active(ctx: &AccountContext, text: &str, now: DateTime<Utc>) -> Conver
         IntentKind::Start | IntentKind::Help => reply_only(help_text()),
         IntentKind::Privacy => reply_only(privacy_text(ctx.original_receipt_retention_days)),
         IntentKind::Today => render_today(ctx),
+        IntentKind::Week => render_week(ctx),
+        IntentKind::Month => render_month(ctx),
         IntentKind::Recent => reply_only(recent_text(&ctx.recent_lines)),
+        IntentKind::Settings => handle_settings(ctx, &intent),
+        IntentKind::Timezone => handle_timezone(ctx, &intent),
+        IntentKind::Schedule => handle_schedule(ctx, &intent),
+        IntentKind::Export => handle_export(),
+        IntentKind::Delete => handle_delete(ctx, now),
         IntentKind::ManualEntry => create_manual(ctx, &intent, now),
         IntentKind::Confirm | IntentKind::Discard => expired_outcome(false),
         IntentKind::EditAmount => expired_outcome(false),
@@ -111,8 +130,52 @@ fn resolve_pending(
     }
 
     match pending.kind {
+        PendingKind::AccountDeletion => resolve_deletion_pending(ctx, pending, intent),
         PendingKind::ManualExpense => resolve_manual_pending(pending, intent),
         PendingKind::ReceiptReview => resolve_receipt_pending(ctx, pending, intent),
+    }
+}
+
+fn resolve_deletion_pending(
+    ctx: &AccountContext,
+    _pending: &PendingConfirmation,
+    intent: &super::parse::Intent,
+) -> ConversationOutcome {
+    match intent.kind {
+        IntentKind::Confirm => ConversationOutcome {
+            replies: vec![ReplyPlan::single(delete_accepted_text(
+                ctx.confirmed_expense_count,
+            ))],
+            commands: vec![DomainCommand::ConfirmAccountDeletion],
+        },
+        IntentKind::Discard => ConversationOutcome {
+            replies: vec![ReplyPlan::single(delete_cancelled_text())],
+            commands: vec![DomainCommand::ClearPending],
+        },
+        _ => ConversationOutcome {
+            replies: vec![ReplyPlan::single(delete_confirm_text(
+                ctx.confirmed_expense_count,
+            ))],
+            commands: vec![],
+        },
+    }
+}
+
+fn handle_export() -> ConversationOutcome {
+    ConversationOutcome {
+        replies: vec![ReplyPlan::single(export_accepted_text())],
+        commands: vec![DomainCommand::RequestAccountExport],
+    }
+}
+
+fn handle_delete(ctx: &AccountContext, now: DateTime<Utc>) -> ConversationOutcome {
+    ConversationOutcome {
+        replies: vec![ReplyPlan::single(delete_confirm_text(
+            ctx.confirmed_expense_count,
+        ))],
+        commands: vec![DomainCommand::RequestAccountDeletion {
+            pending_expires_at: now + chrono::Duration::seconds(PENDING_CONFIRMATION_TTL_SECS),
+        }],
     }
 }
 
@@ -249,13 +312,110 @@ fn create_manual(
 }
 
 fn render_today(ctx: &AccountContext) -> ConversationOutcome {
-    let summary = ctx.today_summary.as_ref();
+    with_insight_snapshot(
+        render_period_summary(ctx.today_summary.as_ref(), "Hôm nay"),
+        "day",
+    )
+}
+
+fn render_week(ctx: &AccountContext) -> ConversationOutcome {
+    with_insight_snapshot(
+        render_period_summary(ctx.week_summary.as_ref(), "Tuần này"),
+        "week",
+    )
+}
+
+fn render_month(ctx: &AccountContext) -> ConversationOutcome {
+    with_insight_snapshot(
+        render_period_summary(ctx.month_summary.as_ref(), "Tháng này"),
+        "month",
+    )
+}
+
+fn with_insight_snapshot(
+    mut outcome: ConversationOutcome,
+    period_kind: &str,
+) -> ConversationOutcome {
+    outcome.commands.push(DomainCommand::RecordInsightSnapshot {
+        period_kind: period_kind.to_string(),
+    });
+    outcome
+}
+
+fn render_period_summary(
+    summary: Option<&super::types::PeriodSummary>,
+    fallback_label: &str,
+) -> ConversationOutcome {
     let body = match summary {
         Some(s) if s.tx_count == 0 => empty_summary_text(&s.label),
         Some(s) => today_summary_text(&s.label, &s.currency, s.total_minor),
-        None => empty_summary_text("Hôm nay"),
+        None => empty_summary_text(fallback_label),
     };
     reply_only(body)
+}
+
+fn handle_settings(ctx: &AccountContext, intent: &super::parse::Intent) -> ConversationOutcome {
+    if intent.timezone.is_empty() {
+        return reply_only(settings_text(
+            &ctx.timezone,
+            &ctx.default_currency,
+            &ctx.schedules,
+        ));
+    }
+    reply_only(invalid_settings_text())
+}
+
+fn handle_timezone(ctx: &AccountContext, intent: &super::parse::Intent) -> ConversationOutcome {
+    if intent.timezone.is_empty() || parse_timezone(&intent.timezone).is_err() {
+        return reply_only(invalid_timezone_text());
+    }
+    ConversationOutcome {
+        replies: vec![ReplyPlan::single(settings_updated_text(
+            "múi giờ",
+            &intent.timezone,
+            &intent.timezone,
+            &ctx.default_currency,
+            &ctx.schedules,
+        ))],
+        commands: vec![DomainCommand::SetTimezone {
+            iana: intent.timezone.clone(),
+        }],
+    }
+}
+
+fn handle_schedule(ctx: &AccountContext, intent: &super::parse::Intent) -> ConversationOutcome {
+    if intent.disable_all_schedules {
+        return ConversationOutcome {
+            replies: vec![ReplyPlan::single(schedule_disabled_text(None))],
+            commands: vec![DomainCommand::DisableSchedule { frequency: None }],
+        };
+    }
+    if intent.disable_schedule {
+        return ConversationOutcome {
+            replies: vec![ReplyPlan::single(schedule_disabled_text(Some(
+                &intent.schedule_frequency,
+            )))],
+            commands: vec![DomainCommand::DisableSchedule {
+                frequency: Some(intent.schedule_frequency.clone()),
+            }],
+        };
+    }
+    if intent.schedule_frequency.is_empty() {
+        return reply_only(schedule_text(&ctx.schedules));
+    }
+    if validate_delivery_minute(intent.delivery_minute).is_err() {
+        return reply_only(schedule_invalid_text());
+    }
+    ConversationOutcome {
+        replies: vec![ReplyPlan::single(schedule_set_text(
+            &intent.schedule_frequency,
+            intent.delivery_minute,
+        ))],
+        commands: vec![DomainCommand::UpsertSchedule {
+            frequency: intent.schedule_frequency.clone(),
+            delivery_minute: intent.delivery_minute,
+        }],
+    }
 }
 
 fn reply_only(body: String) -> ConversationOutcome {

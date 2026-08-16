@@ -15,12 +15,63 @@ outbound_delivery = 4
 [retention]
 original_receipt_days = 7
 
+[quotas]
+per_user_daily_receipts = 20
+monthly_extraction_pages = 80
+zalo_monthly_messages = 3000
+monthly_insight_narratives = 30
+
+[insights]
+llm_enabled = false
+
+[features]
+extraction_enabled = true
+outbound_enabled = true
+
+[metrics]
+enabled = false
+# bind is ignored when /metrics is served on the main HTTP listener
+bind = "127.0.0.1:9090"
+
+[update]
+public_keys_directory = "/etc/zl-expense/update-keys"
+install_path = "/usr/bin/zl-expense"
+state_directory = "/var/lib/zl-expense/update"
+
 [credentials]
 directory = "/etc/zl-expense/credentials"
 
 [access]
 # Empty is fail-closed: no provider identity may create or use an account.
 allowed_provider_sender_ids = []
+
+[storage]
+backend = "filesystem"
+directory = "/var/lib/zl-expense/objects"
+# Optional S3/MinIO (set backend = "s3"):
+# endpoint = "https://minio.example.internal"
+# bucket = "zl-expense"
+# region = "us-east-1"
+# access_key_credential = "s3-access-key"
+# secret_key_credential = "s3-secret-key"
+# force_path_style = true
+
+[extraction]
+backend = "fake"
+default_profile = "receipt-fast"
+api_base = "https://generativelanguage.googleapis.com"
+
+# Named Gemini profiles (required when extraction.backend = "gemini"):
+# [[ai.profiles]]
+# name = "receipt-fast"
+# provider = "gemini"
+# model = "gemini-2.5-flash"
+# credential = "gemini-receipt-fast"
+# task = "extraction"
+# timeout_seconds = 30
+# max_input_bytes = 4194304
+# thinking_effort = "none"
+# schema_version = "v1"
 
 [zalo]
 bot_token_credential = "zalo-bot"

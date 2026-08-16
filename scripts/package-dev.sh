@@ -31,6 +31,37 @@ require_path() {
     fi
 }
 
+stage_operator_docs() {
+    local doc_dir="${1}"
+    local deploy_dir="${2}"
+
+    install -d "${doc_dir}" "${deploy_dir}/caddy" "${deploy_dir}/minio"
+
+    if [ -f "${ROOT}/docs/operator-install.md" ]; then
+        stage_file 0644 "${ROOT}/docs/operator-install.md" \
+            "${doc_dir}/operator-install.md"
+    fi
+    if [ -f "${ROOT}/docs/operator-runbook.md" ]; then
+        stage_file 0644 "${ROOT}/docs/operator-runbook.md" \
+            "${doc_dir}/operator-runbook.md"
+    fi
+    if [ -f "${ROOT}/docs/privacy-policy-template.md" ]; then
+        stage_file 0644 "${ROOT}/docs/privacy-policy-template.md" \
+            "${doc_dir}/privacy-policy-template.md"
+    fi
+    if [ -f "${ROOT}/deploy/caddy/Caddyfile" ]; then
+        stage_file 0644 "${ROOT}/deploy/caddy/Caddyfile" \
+            "${deploy_dir}/caddy/Caddyfile"
+    fi
+    if [ -f "${ROOT}/deploy/minio/compose.minio.yaml" ]; then
+        stage_file 0644 "${ROOT}/deploy/minio/compose.minio.yaml" \
+            "${deploy_dir}/minio/compose.minio.yaml"
+    fi
+    if [ -f "${ROOT}/dist/sbom.cdx.json" ]; then
+        stage_file 0644 "${ROOT}/dist/sbom.cdx.json" "${doc_dir}/sbom.cdx.json"
+    fi
+}
+
 require_path "binary" "${BINARY}"
 require_path "migrations directory" "${MIGRATIONS_SRC}"
 require_path "config example" "${CONFIG_EXAMPLE}"
@@ -51,10 +82,8 @@ stage_file 0644 "${CONFIG_EXAMPLE}" "${DEB_STAGING}/usr/share/zl-expense/config.
 stage_file 0644 "${ROOT}/deploy/systemd/zl-expense.service" \
     "${DEB_STAGING}/lib/systemd/system/zl-expense.service"
 
-if [ -f "${ROOT}/docs/operator-install.md" ]; then
-    stage_file 0644 "${ROOT}/docs/operator-install.md" \
-        "${DEB_STAGING}/usr/share/doc/zl-expense/operator-install.md"
-fi
+stage_operator_docs "${DEB_STAGING}/usr/share/doc/zl-expense" \
+    "${DEB_STAGING}/usr/share/zl-expense/deploy"
 
 substitute_control \
     "${ROOT}/packaging/debian/DEBIAN/control" \
@@ -92,10 +121,7 @@ stage_file 0644 "${CONFIG_EXAMPLE}" "${TARBALL_ROOT}/share/config.example.toml"
 stage_file 0644 "${ROOT}/deploy/systemd/zl-expense.service" \
     "${TARBALL_ROOT}/systemd/zl-expense.service"
 
-if [ -f "${ROOT}/docs/operator-install.md" ]; then
-    stage_file 0644 "${ROOT}/docs/operator-install.md" \
-        "${TARBALL_ROOT}/doc/operator-install.md"
-fi
+stage_operator_docs "${TARBALL_ROOT}/doc" "${TARBALL_ROOT}/deploy"
 
 cat >"${TARBALL_ROOT}/INSTALL.txt" <<'EOF'
 Portable zl-expense bundle (unsigned development build).

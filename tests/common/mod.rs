@@ -86,6 +86,9 @@ original_receipt_days = 7
 [credentials]
 directory = "{}"
 
+[storage]
+backend = "memory"
+
 [zalo]
 bot_token_credential = "zalo-bot"
 webhook_secret_credential = "webhook-secret"
@@ -230,6 +233,7 @@ pub fn receipt_lifecycle(pool: PgPool) -> ReceiptLifecycle {
         ReceiptConfig {
             original_receipt_days: 7,
             review_expiry_hours: 72,
+            ..ReceiptConfig::default()
         },
     )
 }

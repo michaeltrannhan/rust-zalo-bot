@@ -10,7 +10,7 @@ use crate::error::ErrorClass;
 use super::error::WorkError;
 use super::types::{
     AttemptOutcome, AttemptSummary, ClaimOptions, ClaimedJob, EnqueueOutcome, EnqueueRequest,
-    FailOutcome, JobState, JobSummary, is_retryable, retry_delay_secs,
+    FailOutcome, JobListRow, JobState, JobSummary, is_retryable, retry_delay_secs,
 };
 
 /// Transactional durable-work store.
@@ -567,6 +567,29 @@ impl WorkStore {
         Ok(())
     }
 
+    /// Cancel queued jobs sharing a serialization key. Leased jobs are left to finish
+    /// so a concurrent handler cannot persist after the delete purge.
+    pub async fn cancel_queued_by_serialization_key_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        serialization_key: &str,
+    ) -> Result<u64, WorkError> {
+        let updated = sqlx::query(
+            r#"
+            UPDATE jobs
+            SET state = 'cancelled',
+                completed_at = NOW(),
+                updated_at = NOW()
+            WHERE serialization_key = $1
+              AND state = 'queued'
+            "#,
+        )
+        .bind(serialization_key)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| WorkError::dependency("cancel queued by serialization key failed"))?;
+        Ok(updated.rows_affected())
+    }
+
     pub async fn recover_dead(&self, job_id: Uuid) -> Result<(), WorkError> {
         let updated = sqlx::query(
             r#"
@@ -623,6 +646,43 @@ impl WorkStore {
         };
 
         Ok(row.into_summary())
+    }
+
+    pub async fn list_jobs(
+        &self,
+        state: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<JobListRow>, WorkError> {
+        let rows = if let Some(state) = state {
+            sqlx::query_as::<_, JobListDbRow>(
+                r#"
+                SELECT id, job_type, state, attempt_count, run_at, last_error_class
+                FROM jobs
+                WHERE state = $1
+                ORDER BY run_at ASC
+                LIMIT $2
+                "#,
+            )
+            .bind(state)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+        } else {
+            sqlx::query_as::<_, JobListDbRow>(
+                r#"
+                SELECT id, job_type, state, attempt_count, run_at, last_error_class
+                FROM jobs
+                ORDER BY run_at ASC
+                LIMIT $1
+                "#,
+            )
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+        }
+        .map_err(|_| WorkError::dependency("job list failed"))?;
+
+        Ok(rows.into_iter().map(JobListDbRow::into_row).collect())
     }
 
     pub async fn list_attempts(&self, job_id: Uuid) -> Result<Vec<AttemptSummary>, WorkError> {
@@ -735,6 +795,29 @@ struct CandidateRow {
 struct FailRow {
     attempt_count: i32,
     max_attempts: i32,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct JobListDbRow {
+    id: Uuid,
+    job_type: String,
+    state: String,
+    attempt_count: i32,
+    run_at: DateTime<Utc>,
+    last_error_class: Option<String>,
+}
+
+impl JobListDbRow {
+    fn into_row(self) -> JobListRow {
+        JobListRow {
+            id: self.id,
+            job_type: self.job_type,
+            state: JobState::parse(&self.state).unwrap_or(JobState::Queued),
+            attempt_count: self.attempt_count,
+            run_at: self.run_at,
+            last_error_class: self.last_error_class,
+        }
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]

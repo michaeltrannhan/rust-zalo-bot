@@ -13,7 +13,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use zl_expense::error::ErrorClass;
 use zl_expense::ingress::{
-    IngressOutcome, IngressRequest, IngressSource, process_image, store_with_receipt,
+    IngressOutcome, IngressPolicy, IngressRequest, IngressSource, process_image, store_with_receipt,
 };
 use zl_expense::outbound::OutboundJobExecution;
 use zl_expense::provider::{
@@ -111,6 +111,7 @@ fn receipt_lifecycle(pool: PgPool) -> ReceiptLifecycle {
         ReceiptConfig {
             original_receipt_days: 7,
             review_expiry_hours: 72,
+            ..ReceiptConfig::default()
         },
     )
 }
@@ -208,7 +209,9 @@ fn job_deps_with_resolver(
         pool,
         test_adapter(),
         receipt,
+        IngressPolicy::default(),
         ZaloMediaDownloader::new(policy, resolver),
+        Arc::new(zl_expense::insight::FakeNarrator),
     )
 }
 

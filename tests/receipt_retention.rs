@@ -191,6 +191,7 @@ async fn retention_deadline_uses_account_preference_not_global_default() {
         ReceiptConfig {
             original_receipt_days: 7,
             review_expiry_hours: 72,
+            ..ReceiptConfig::default()
         },
     );
     let submission_id = Uuid::new_v4();

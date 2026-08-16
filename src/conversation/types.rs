@@ -17,15 +17,29 @@ pub struct AccountContext {
     pub default_currency: String,
     pub timezone: String,
     pub original_receipt_retention_days: u32,
+    /// Remaining daily receipt submissions before quota is exceeded.
+    pub remaining_daily_receipts: i64,
+    pub confirmed_expense_count: u32,
     pub pending: Option<PendingConfirmation>,
     pub today_summary: Option<PeriodSummary>,
+    pub week_summary: Option<PeriodSummary>,
+    pub month_summary: Option<PeriodSummary>,
+    pub schedules: Vec<ScheduleLine>,
     pub recent_lines: Vec<RecentExpenseLine>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScheduleLine {
+    pub frequency: String,
+    pub delivery_minute: i32,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingKind {
     ManualExpense,
     ReceiptReview,
+    AccountDeletion,
 }
 
 /// Open confirmation pending action plus the draft it targets.
@@ -134,6 +148,24 @@ pub enum DomainCommand {
         amount_minor: i64,
     },
     ClearPending,
+    SetTimezone {
+        iana: String,
+    },
+    UpsertSchedule {
+        frequency: String,
+        delivery_minute: i32,
+    },
+    DisableSchedule {
+        frequency: Option<String>,
+    },
+    RequestAccountDeletion {
+        pending_expires_at: DateTime<Utc>,
+    },
+    ConfirmAccountDeletion,
+    RequestAccountExport,
+    RecordInsightSnapshot {
+        period_kind: String,
+    },
 }
 
 /// Versioned consent copy identifier.

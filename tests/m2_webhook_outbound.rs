@@ -103,6 +103,8 @@ async fn verified_duplicate_webhook_delivers_exactly_one_reply() {
         readiness: Arc::new(ReadinessState::new_ready()),
         pool: Some(pool.clone()),
         webhook: Some(webhook),
+        metrics: None,
+        metrics_enabled: false,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

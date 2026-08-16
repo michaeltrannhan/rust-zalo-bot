@@ -41,8 +41,32 @@ impl ReceiptError {
         Self::new(ErrorClass::Dependency, message)
     }
 
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(ErrorClass::Forbidden, message)
+    }
+
     pub fn transient(message: impl Into<String>) -> Self {
         Self::new(ErrorClass::Transient, message)
+    }
+
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self::new(ErrorClass::Timeout, message)
+    }
+
+    pub fn rate_limited(message: impl Into<String>) -> Self {
+        Self::new(ErrorClass::RateLimited, message)
+    }
+
+    pub fn auth(message: impl Into<String>) -> Self {
+        Self::new(ErrorClass::Auth, message)
+    }
+
+    pub fn quota_exceeded(message: impl Into<String>) -> Self {
+        Self::new(ErrorClass::QuotaExceeded, message)
+    }
+
+    pub fn kill_switch(message: impl Into<String>) -> Self {
+        Self::new(ErrorClass::KillSwitch, message)
     }
 }
 

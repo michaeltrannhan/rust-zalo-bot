@@ -63,6 +63,9 @@ original_receipt_days = 7
 [credentials]
 directory = "{}"
 
+[storage]
+backend = "memory"
+
 [zalo]
 bot_token_credential = "zalo-bot"
 webhook_secret_credential = "webhook-secret"

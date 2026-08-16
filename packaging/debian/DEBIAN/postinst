@@ -41,6 +41,8 @@ ensure_user() {
 configure_paths() {
     install -d -m 0755 -o root -g root "${CONFIG_DIR}"
     install -d -m 0750 -o root -g "${SERVICE_GROUP}" "${CREDENTIALS_DIR}"
+    install -d -m 0750 -o root -g "${SERVICE_GROUP}" "${CONFIG_DIR}/update-keys"
+    install -d -m 0750 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" /var/lib/zl-expense/update
 
     if [ ! -f "${CONFIG_FILE}" ] && [ -f "${CONFIG_EXAMPLE}" ]; then
         install -m 0644 -o root -g root "${CONFIG_EXAMPLE}" "${CONFIG_FILE}"

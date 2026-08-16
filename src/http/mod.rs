@@ -19,6 +19,7 @@ use crate::ingress::{
     IngressOutcome, IngressRequest, IngressSource, IngressStore, process_image,
     process_text_command,
 };
+use crate::metrics::Metrics;
 use crate::provider::{InboundEventKind, SECRET_HEADER, ZaloHttpAdapter};
 
 /// Authenticated Zalo webhook application service.
@@ -51,15 +52,22 @@ pub struct AppState {
     pub readiness: Arc<ReadinessState>,
     pub pool: Option<PgPool>,
     pub webhook: Option<Arc<WebhookService>>,
+    pub metrics: Option<Arc<Metrics>>,
+    pub metrics_enabled: bool,
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let metrics_enabled = state.metrics_enabled;
+    let mut router = Router::new()
         .route("/health/live", get(live_handler))
         .route("/health/ready", get(ready_handler))
-        .route("/webhooks/zalo", post(zalo_webhook_handler))
-        .with_state(state)
-        .layer(TraceLayer::new_for_http())
+        .route("/webhooks/zalo", post(zalo_webhook_handler));
+
+    if metrics_enabled {
+        router = router.route("/metrics", get(metrics_handler));
+    }
+
+    router.with_state(state).layer(TraceLayer::new_for_http())
 }
 
 async fn zalo_webhook_handler(
@@ -75,6 +83,9 @@ async fn zalo_webhook_handler(
         .get(SECRET_HEADER)
         .and_then(|value| value.to_str().ok());
     if service.adapter.verify_webhook_secret(secret).is_err() {
+        if let Some(metrics) = &state.metrics {
+            metrics.inc_webhook_unauthorized();
+        }
         return status_json(StatusCode::UNAUTHORIZED, "unauthorized");
     }
 
@@ -112,8 +123,18 @@ async fn zalo_webhook_handler(
             observed_at: text_event.received_at,
         };
         return match process_text_command(&service.store, ingress).await {
-            Ok(IngressOutcome::Accepted { .. }) => status_json(StatusCode::OK, "accepted"),
-            Ok(IngressOutcome::Duplicate { .. }) => status_json(StatusCode::OK, "duplicate"),
+            Ok(IngressOutcome::Accepted { .. }) => {
+                if let Some(metrics) = &state.metrics {
+                    metrics.inc_webhook_accepted();
+                }
+                status_json(StatusCode::OK, "accepted")
+            }
+            Ok(IngressOutcome::Duplicate { .. }) => {
+                if let Some(metrics) = &state.metrics {
+                    metrics.inc_webhook_duplicate();
+                }
+                status_json(StatusCode::OK, "duplicate")
+            }
             Ok(IngressOutcome::ModeRejected { .. }) => {
                 status_json(StatusCode::CONFLICT, "mode_rejected")
             }
@@ -143,8 +164,18 @@ async fn zalo_webhook_handler(
         observed_at: image_event.received_at,
     };
     match process_image(&service.store, ingress, image_event.image_url).await {
-        Ok(IngressOutcome::Accepted { .. }) => status_json(StatusCode::OK, "accepted"),
-        Ok(IngressOutcome::Duplicate { .. }) => status_json(StatusCode::OK, "duplicate"),
+        Ok(IngressOutcome::Accepted { .. }) => {
+            if let Some(metrics) = &state.metrics {
+                metrics.inc_webhook_accepted();
+            }
+            status_json(StatusCode::OK, "accepted")
+        }
+        Ok(IngressOutcome::Duplicate { .. }) => {
+            if let Some(metrics) = &state.metrics {
+                metrics.inc_webhook_duplicate();
+            }
+            status_json(StatusCode::OK, "duplicate")
+        }
         Ok(IngressOutcome::ModeRejected { .. }) => {
             status_json(StatusCode::CONFLICT, "mode_rejected")
         }
@@ -190,4 +221,23 @@ async fn ready_handler(State(state): State<AppState>) -> Response {
         )
             .into_response()
     }
+}
+
+async fn metrics_handler(State(state): State<AppState>) -> Response {
+    let Some(pool) = state.pool.as_ref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "metrics unavailable").into_response();
+    };
+    let Some(metrics) = state.metrics.as_ref() else {
+        return (StatusCode::NOT_FOUND, "metrics disabled").into_response();
+    };
+    let body = metrics.render(pool).await;
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
 }

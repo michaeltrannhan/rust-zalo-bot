@@ -1,7 +1,6 @@
 //! Post-extraction receipt review follow-up: pending state and outbound card.
 
 use chrono::{DateTime, Duration, Utc};
-use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -9,12 +8,15 @@ use crate::conversation::{
     format_date_vn, format_minor, manual_confirmation_card, transaction_type_label,
 };
 use crate::receipt::ReceiptLifecycle;
-use crate::work::{EnqueueRequest, WorkStore};
+
+use super::policy::IngressPolicy;
+use super::store::enqueue_outbound_in_transaction;
 
 /// Enqueue the receipt review card and pending action in one idempotent transaction.
 pub async fn enqueue_receipt_review_followup(
     pool: &PgPool,
     receipt: &ReceiptLifecycle,
+    policy: &IngressPolicy,
     account_id: Uuid,
     submission_id: Uuid,
 ) -> Result<(), FollowupError> {
@@ -39,60 +41,19 @@ pub async fn enqueue_receipt_review_followup(
     upsert_receipt_review_pending(&mut tx, account_id, submission_id, expires_at).await?;
 
     let body = review_card_body(&context);
-    let outbound_id = Uuid::new_v4();
-    let inserted: Option<Uuid> = sqlx::query_scalar(
-        r#"
-        INSERT INTO outbound_messages (
-            id,
-            account_id,
-            inbound_event_id,
-            idempotency_key,
-            provider_scope,
-            provider_target,
-            body,
-            state
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued')
-        ON CONFLICT (idempotency_key) DO NOTHING
-        RETURNING id
-        "#,
-    )
-    .bind(outbound_id)
-    .bind(account_id)
-    .bind(context.inbound_event_id)
-    .bind(&idempotency_key)
-    .bind(&context.provider_scope)
-    .bind(&context.provider_chat_id)
-    .bind(&body)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| FollowupError::dependency("outbound insert failed"))?;
-
-    let outbound_id = if let Some(outbound_id) = inserted {
-        outbound_id
-    } else {
-        tx.rollback().await.ok();
-        return Ok(());
-    };
-
-    WorkStore::enqueue_in_transaction(
+    enqueue_outbound_in_transaction(
         &mut tx,
-        EnqueueRequest {
-            id: Uuid::new_v4(),
-            job_type: "outbound.deliver".to_string(),
-            payload: json!({
-                "schema_version": 1,
-                "outbound_id": outbound_id,
-            }),
-            dedupe_key: format!("outbound.deliver:{idempotency_key}"),
-            serialization_key: Some(format!("account:{account_id}")),
-            priority: 0,
-            run_at: Utc::now(),
-            max_attempts: 10,
-        },
+        policy,
+        Utc::now(),
+        Some(account_id),
+        context.inbound_event_id,
+        &context.provider_scope,
+        &context.provider_chat_id,
+        &body,
+        &idempotency_key,
     )
     .await
-    .map_err(|_| FollowupError::dependency("followup job enqueue failed"))?;
+    .map_err(|_| FollowupError::dependency("outbound enqueue failed"))?;
 
     tx.commit()
         .await
