@@ -53,11 +53,29 @@ Current paused-work handoff: `docs/engineering-handoff.md`.
   - [x] Vertical path proven: image webhook → download → extract →
         review/edit/confirm/reject → today/history, real PostgreSQL, no
         external network
-- [ ] M5 — Real extraction and object storage
-- [ ] M6 — Notifications, schedules, deletion, and insights
-- [ ] M7 — Operator depth
+- [x] M5 — Real extraction and object storage
+  - [x] Filesystem object store (atomic put, path-traversal rejected)
+  - [x] Path-style MinIO/S3 adapter with SigV4 behind the same seam
+  - [x] Named Gemini profiles, capability validation, loopback generateContent
+  - [x] 2048-pixel extraction downscale; attempt metadata is persisted
+  - [x] Runtime selects store/extractor from config (`memory`/`fake` for tests)
+- [x] M6 — Notifications, schedules, deletion, and insights
+  - [x] Daily/monthly quotas and extraction/outbound kill switches
+  - [x] IANA/DST-correct summary schedules; idle scheduler and retention roles
+  - [x] Account deletion vs in-flight work (objects first; identities kept)
+  - [x] Confirmed-only insight snapshots; optional aggregate-only narrative
+- [x] M7 — Operator depth
+  - [x] `status`, `jobs`, `doctor`, `ingress`, `backup`/`restore`, `logs`, `diagnose`
+  - [x] Prometheus `/metrics` off by default; allowlisted labels only
+  - [x] systemd `Type=notify`, watchdog, Caddy and MinIO deploy profiles
 - [ ] M8 — Performance and security hardening
+  - [x] Local: systemd `MemoryMax`/`TasksMax`, SBOM script, metrics privacy tests
+  - [ ] Native amd64/arm64 resource measurements on the target profile
+  - [ ] Webhook load, mixed soak, crash matrix, media abuse, disk-full on hosts
 - [ ] M9 — Signed stable release and update
+  - [x] Local: Ed25519 metadata signature, checksum, schema-gated rollback
+  - [ ] Signed amd64/arm64 debs and tarballs produced on release hosts
+  - [ ] Native install, reboot, update, and health-fail restore evidence
 
 ## Integration ledger
 
@@ -87,6 +105,12 @@ before or immediately after integration.
 | M4 | `m4-vertical-wiring` | `6f1f63e` | yes, full base diff | `b0a8c64` | HTTP image dispatch, `dispatch_leased_job`, idempotent review follow-up |
 | M4 | lead correction | `99ab0fd` | yes | `9f62a53` | Shared confirmation template; extract-job dedupe fence |
 | M4 | `m4-vertical-tests` | `91d4d3f` | yes, full file review + independent suite | `b200d50` | Seven public-seam vertical tests; worker left the file uncommitted overnight, lead signed after 7/7 + full suite |
+| M4 | lead docs | `8b057e5` | yes | `8b057e5` | Recorded M4 vertical-path completion |
+| M5 | `m5-object-store` + lead | `eb21448` | yes, full diff + independent suite | `eb21448` | Filesystem/S3 stores, Gemini HTTP adapter, named profiles, 2048 downscale |
+| M6 | Composer + lead | `eb21448` | yes; lead fixed midnight `/sched`, DST period math, insight narrative preserve | `eb21448` | Quotas, schedules, deletion/export, insight snapshots; schema 6–10 |
+| M7 | Composer + lead | `eb21448` | yes; lead kept NOTIFY_SOCKET for watchdog, redacted `jobs show` | `eb21448` | Operator CLI, `/metrics`, notify/watchdog, Caddy/MinIO, runbook |
+| M8 | lead | `eb21448` | local only | `eb21448` | SBOM, systemd resource limits, metrics label allowlist; native gates env-limited |
+| M9 | lead | `eb21448` | local only | `eb21448` | `update preflight/apply/rollback`; native signed-package host evidence env-limited |
 
 ## Validation ledger
 
@@ -115,17 +139,37 @@ before or immediately after integration.
 | M4 | `cargo test --test m4_runtime_jobs` | pass | 4 dispatch tests: ingest+extract, idempotent review card, SSRF/oversize → `failed_permanent`, unknown type |
 | M4 | `cargo test --test m4_receipt_vertical` | pass | 7 public-seam tests: duplicate webhook, review card, confirm+today/recent, edit then confirm, reject, hash-duplicate absorb, 401/unsupported |
 | M4 | `TEST_DATABASE_URL=… cargo test --all-targets --all-features` after `b200d50` | pass | Full suite including the 7 vertical tests; fmt/clippy clean in the isolated worktree |
+| M5 | `cargo test --test object_store_fs --test object_store_s3` | pass | Filesystem durability/path-traversal; loopback path-style S3 including PUT 404 ≠ success |
+| M5 | `cargo test --test gemini_http_contract --test unit_seams --test receipt_lifecycle` | pass | generateContent success/429/5xx/timeout/401/malformed/block/downscale; thinking_effort capability check; attempt metadata persistence |
+| M5 | `TEST_DATABASE_URL=… cargo test --all-targets --all-features` | pass | Full suite green in the M5 worktree; fmt/clippy `-D warnings` clean |
+| M5–M9 | `TEST_DATABASE_URL=… cargo test --all-targets --all-features` after `eb21448` | pass | Full suite including m6/m7/m8/m9; fmt/clippy `-D warnings` clean |
+| M5–M9 | `./scripts/test-package.sh` | pass | Type=notify unit, Caddy/runbook in bundle, Debian 12 Docker remove/purge |
+| M8 | `python3 scripts/generate-sbom.py` | pass | CycloneDX-lite from `cargo metadata` |
+| M8 | `./scripts/security-audit.sh` | pass | Lockfile TLS check; `cargo-deny` not installed locally |
+| M9 | `cargo test --test m9_update` | pass | Bad signature rejected; compatible rollback restores; incompatible rollback blocked |
 
 ## Accepted residual risks
 
-- Two extractor workers may both perform external extraction while a
-  submission is `extracting`. Persistence is idempotent, so the only cost is
-  duplicated extraction work; account-level job serialization bounds it.
-  Accepted for M4 (FakeExtractor only); revisit with a claim timestamp fence
-  when real Gemini extraction lands in M5.
-- The M4 object store is process-local memory; a worker restart between
-  `stored` and extraction loses original bytes. M5 introduces the durable
-  filesystem/S3 store required for crash recovery of originals.
+- Two extractor workers may both perform extraction while a submission is
+  `extracting`. Persistence is still idempotent; account-level job
+  serialization bounds it. An `extracting_claimed_until` fence was deferred
+  (no schema change in this slice). Cost is now a possible duplicate Gemini
+  call, not just FakeExtractor work.
+- Virtual-hosted-style S3 (`force_path_style = false`) is rejected at config
+  load; only path-style MinIO/S3 is implemented.
+- Live Google Gemini smoke is opt-in and is not a PR gate. Loopback
+  generateContent contracts cover the wire classes.
+- Default `extraction.backend = "fake"` keeps local/test runs off Gemini.
+  Operators must set `backend = "gemini"` and a named profile to use the
+  HTTP adapter.
+- Insights LLM remains off by default (`[insights] llm_enabled = false`).
+  Narrator input is the aggregate JSON only.
+- `backup`/`restore` shell out to `pg_dump`/`pg_restore`; they are not
+  exercised in CI when those tools are absent.
+- `doctor --active zalo|gemini` can make live HTTP calls; Gemini refuses
+  unless `api_base` is loopback.
+- M8/M9 native Debian/Ubuntu amd64+arm64 resource, soak, signed-package,
+  reboot, and host rollback evidence is still environment-limited.
 
 ## Environment-limited release gates
 
