@@ -1,8 +1,8 @@
 # Engineering handoff
 
-Snapshot date: 2026-08-16 (Asia/Ho_Chi_Minh), after signed `eb21448` on
-`main`. Local M5–M7 exit criteria are met. M8/M9 native host gates remain
-environment-limited.
+Snapshot date: 2026-08-17 (Asia/Ho_Chi_Minh), after `da7b058` on `main`
+plus arm64 host evidence. Local M5–M7 exit criteria are met. M8/M9 arm64
+host gates are recorded; amd64 and reboot remain open.
 
 This document records the current execution state of
 `.cursor/plans/rust_expense_bot_port_0d6549cd.plan.md`.
@@ -17,12 +17,14 @@ This document records the current execution state of
 - [x] M5 — Real extraction and object storage (`eb21448`)
 - [x] M6 — Notifications, schedules, deletion, and insights (`eb21448`)
 - [x] M7 — Operator depth (`eb21448`)
-- [ ] M8 — Performance and security hardening (local substitutes only)
-- [ ] M9 — Signed stable release and update (local update flow only)
+- [ ] M8 — Performance and security hardening (arm64 host evidence recorded; amd64 open)
+- [ ] M9 — Signed stable release and update (arm64 apply/rollback recorded; amd64 and reboot open)
 
 ## Authoritative repository state
 
-`main` is at `eb21448` (`feat: add M5-M9 storage through signed updates`).
+`main` is at `da7b058` (`docs: drop disk-full from M8 gates`), with systemd
+`--config` fix in `5144b39`. Arm64 evidence:
+`docs/release-evidence/2026-08-17-arm64/`.
 
 Included locally:
 
@@ -56,7 +58,6 @@ cargo test --all-targets --all-features
 
 ## Work not yet implemented
 
-M8/M9 **native** release gates on representative Debian/Ubuntu amd64 and
-arm64 hosts: resource measurements, webhook load, one-hour soak, crash
-matrix, signed amd64/arm64 debs/tarballs, reboot, and host update/rollback
-evidence. Local substitutes do not count as that proof.
+M8/M9 remaining native gates: **amd64** package/resource/soak/update, and
+reboot survival on a host that is not sharing the live Go poller. Arm64
+Ubuntu 24.04 evidence is already recorded.

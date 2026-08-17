@@ -1,0 +1,2 @@
+credential_files: database, webhook-secret, zalo-bot
+kill_switches: extraction_enabled=true outbound_enabled=true insights_llm_enabled=false

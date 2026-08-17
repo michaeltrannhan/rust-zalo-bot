@@ -1,0 +1,5 @@
+ExecStart=/usr/bin/zl-expense --config /etc/zl-expense/config.toml run
+Environment=ZL_EXPENSE_CONFIG=/etc/zl-expense/config.toml
+Environment=ZL_EXPENSE_CONFIG=/etc/zl-expense/config.toml
+ExecStart=
+ExecStart=/usr/bin/zl-expense --config /etc/zl-expense/config.toml run

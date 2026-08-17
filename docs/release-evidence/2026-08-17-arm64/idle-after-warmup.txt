@@ -1,0 +1,3 @@
+MainPID=1580177
+MemoryCurrent=2084864
+TasksCurrent=2

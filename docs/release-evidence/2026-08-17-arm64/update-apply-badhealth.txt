@@ -1,0 +1,4 @@
+backup written to /var/lib/zl-expense/update/pre-update.dump
+[32m INFO[0m relation "_sqlx_migrations" already exists, skipping
+{"error_class":"health_failed","message":"health check failed after update; previous binary restored"}
+apply_bad_exit=11

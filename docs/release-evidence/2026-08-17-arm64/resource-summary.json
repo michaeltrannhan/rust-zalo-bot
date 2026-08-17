@@ -1,0 +1,18 @@
+{
+  "idle_rss_kib": {
+    "min": 11468,
+    "max": 11468,
+    "mean": 11468
+  },
+  "soak_rss_kib": {
+    "min": 11532,
+    "max": 12168,
+    "mean": 12137.173184357542,
+    "first": 11532,
+    "last": 12168,
+    "first_half_mean": 12110.189944134077,
+    "second_half_mean": 12164.156424581006
+  },
+  "idle_samples": 60,
+  "soak_samples": 358
+}

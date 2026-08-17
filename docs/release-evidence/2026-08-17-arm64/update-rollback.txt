@@ -1,0 +1,1 @@
+rollback restored previous binary to /usr/bin/zl-expense

@@ -1,0 +1,20 @@
+Aug 17 06:42:58 instance-20260813-1023 systemd[1]: zl-expense.service: Consumed 1.724s CPU time, 2.9M memory peak, 0B memory swap peak.
+Aug 17 06:42:58 instance-20260813-1023 systemd[1]: Starting zl-expense.service - ZL Expense Bot...
+Aug 17 06:42:58 instance-20260813-1023 zl-expense[1581312]:  INFO relation "_sqlx_migrations" already exists, skipping
+Aug 17 06:42:58 instance-20260813-1023 zl-expense[1581312]:  INFO starting supervised runtime roles=[Ingress, Worker, Scheduler, Maintenance]
+Aug 17 06:42:58 instance-20260813-1023 zl-expense[1581312]:  INFO http server listening address=127.0.0.1:8088
+Aug 17 06:42:58 instance-20260813-1023 systemd[1]: Started zl-expense.service - ZL Expense Bot.
+Aug 17 06:42:58 instance-20260813-1023 zl-expense[1581312]:  INFO role task started role="worker"
+Aug 17 06:42:58 instance-20260813-1023 zl-expense[1581312]:  INFO role task started role="scheduler"
+Aug 17 06:42:58 instance-20260813-1023 zl-expense[1581312]:  INFO role task started role="maintenance"
+Aug 17 06:42:59 instance-20260813-1023 systemd[1]: zl-expense.service: Main process exited, code=killed, status=9/KILL
+Aug 17 06:42:59 instance-20260813-1023 systemd[1]: zl-expense.service: Failed with result 'signal'.
+Aug 17 06:43:04 instance-20260813-1023 systemd[1]: zl-expense.service: Scheduled restart job, restart counter is at 1.
+Aug 17 06:43:04 instance-20260813-1023 systemd[1]: Starting zl-expense.service - ZL Expense Bot...
+Aug 17 06:43:04 instance-20260813-1023 zl-expense[1581444]:  INFO relation "_sqlx_migrations" already exists, skipping
+Aug 17 06:43:04 instance-20260813-1023 zl-expense[1581444]:  INFO starting supervised runtime roles=[Ingress, Worker, Scheduler, Maintenance]
+Aug 17 06:43:04 instance-20260813-1023 zl-expense[1581444]:  INFO http server listening address=127.0.0.1:8088
+Aug 17 06:43:04 instance-20260813-1023 zl-expense[1581444]:  INFO role task started role="worker"
+Aug 17 06:43:04 instance-20260813-1023 zl-expense[1581444]:  INFO role task started role="scheduler"
+Aug 17 06:43:04 instance-20260813-1023 zl-expense[1581444]:  INFO role task started role="maintenance"
+Aug 17 06:43:04 instance-20260813-1023 systemd[1]: Started zl-expense.service - ZL Expense Bot.

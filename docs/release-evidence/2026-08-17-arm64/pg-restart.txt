@@ -1,0 +1,2 @@
+ready_during_pg=200
+ready_after_pg_restart_s=1

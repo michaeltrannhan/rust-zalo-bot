@@ -70,12 +70,13 @@ Current paused-work handoff: `docs/engineering-handoff.md`.
   - [x] systemd `Type=notify`, watchdog, Caddy and MinIO deploy profiles
 - [ ] M8 — Performance and security hardening
   - [x] Local: systemd `MemoryMax`/`TasksMax`, SBOM script, metrics privacy tests
-  - [ ] Native amd64/arm64 resource measurements on the target profile
-  - [ ] Webhook load, mixed soak, crash matrix, media abuse on hosts
+  - [x] Native arm64 resource, load, soak, crash, and media-abuse evidence (`docs/release-evidence/2026-08-17-arm64/`)
+  - [ ] Native amd64 resource measurements on the target profile
 - [ ] M9 — Signed stable release and update
   - [x] Local: Ed25519 metadata signature, checksum, schema-gated rollback
-  - [ ] Signed amd64/arm64 debs and tarballs produced on release hosts
-  - [ ] Native install, reboot, update, and health-fail restore evidence
+  - [x] Signed arm64 deb/tarball plus host apply/rollback/health-fail restore
+  - [ ] Signed amd64 packages
+  - [ ] Reboot survival (deferred on the arm64 host that also runs the live Go poller)
 
 ## Integration ledger
 
@@ -109,8 +110,8 @@ before or immediately after integration.
 | M5 | `m5-object-store` + lead | `eb21448` | yes, full diff + independent suite | `eb21448` | Filesystem/S3 stores, Gemini HTTP adapter, named profiles, 2048 downscale |
 | M6 | Composer + lead | `eb21448` | yes; lead fixed midnight `/sched`, DST period math, insight narrative preserve | `eb21448` | Quotas, schedules, deletion/export, insight snapshots; schema 6–10 |
 | M7 | Composer + lead | `eb21448` | yes; lead kept NOTIFY_SOCKET for watchdog, redacted `jobs show` | `eb21448` | Operator CLI, `/metrics`, notify/watchdog, Caddy/MinIO, runbook |
-| M8 | lead | `eb21448` | local only | `eb21448` | SBOM, systemd resource limits, metrics label allowlist; native gates env-limited |
-| M9 | lead | `eb21448` | local only | `eb21448` | `update preflight/apply/rollback`; native signed-package host evidence env-limited |
+| M8 | lead | `eb21448` then host | arm64 host 2026-08-17 | `eb21448` + evidence | Local SBOM/limits; arm64 Ubuntu 24.04 resource/load/soak/crash recorded |
+| M9 | lead | `eb21448` then host | arm64 host 2026-08-17 | `eb21448` + evidence | Local update tests; arm64 signed apply/rollback/health-fail restore recorded |
 
 ## Validation ledger
 
@@ -147,6 +148,8 @@ before or immediately after integration.
 | M8 | `python3 scripts/generate-sbom.py` | pass | CycloneDX-lite from `cargo metadata` |
 | M8 | `./scripts/security-audit.sh` | pass | Lockfile TLS check; `cargo-deny` not installed locally |
 | M9 | `cargo test --test m9_update` | pass | Bad signature rejected; compatible rollback restores; incompatible rollback blocked |
+| M8 | Ubuntu 24.04 arm64 installed `.deb` | pass | Idle RSS 11.2 MiB; ready 98 ms; 25 rps p95 10.4 ms; 1 h soak 3577/3577; SIGTERM 52 ms; kill -9 recovered |
+| M9 | Ubuntu 24.04 arm64 `update apply/rollback` | pass | Signed `0.1.0-m89host`; health-fail restore kept ELF; reboot not run (shared Go poller) |
 
 ## Accepted residual risks
 
@@ -170,12 +173,14 @@ before or immediately after integration.
   unless `api_base` is loopback.
 - Host disk-full / ENOSPC injection is out of scope for this product size
   (recorded 2026-08-17). It is not an M8 release gate.
-- M8/M9 native Debian/Ubuntu amd64+arm64 resource, soak, signed-package,
-  reboot, and host rollback evidence is still environment-limited.
+- M8/M9 **amd64** native package, resource, soak, and update evidence is
+  still missing. Arm64 host evidence is in
+  `docs/release-evidence/2026-08-17-arm64/`. Reboot was not run on that
+  host because it also runs a live Go poller.
 
 ## Environment-limited release gates
 
-Native Debian/Ubuntu systemd, package upgrade/rollback, amd64 and arm64
-resource measurements, and one-hour soak evidence require representative
-hosts. Local substitutes may catch defects, but they do not count as the
-release-gate proof defined by the product plan.
+Arm64 Ubuntu 24.04 systemd install, resource gates, one-hour soak, and
+signed update/rollback are recorded. Remaining native gates are amd64
+packages plus reboot survival on a host that does not share the live Go
+process. Local Mac/Docker substitutes still do not count.

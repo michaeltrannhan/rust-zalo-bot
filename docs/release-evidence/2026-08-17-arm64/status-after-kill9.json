@@ -1,0 +1,27 @@
+{
+  "healthy": true,
+  "ready": true,
+  "migrations_current": true,
+  "ingress": {
+    "mode": "webhook",
+    "mode_generation": 1
+  },
+  "jobs": {
+    "queued": 0,
+    "leased": 0,
+    "completed": 500,
+    "cancelled": 0,
+    "dead": 0
+  },
+  "jobs_dead": 0,
+  "jobs_oldest_queued_age_seconds": null,
+  "outbound": {
+    "queued": 0,
+    "sending": 0,
+    "sent": 500,
+    "failed": 0,
+    "suppressed": 0,
+    "ambiguous": 0
+  },
+  "last_inbound_received_at": "2026-08-17T06:42:44.833871Z"
+}

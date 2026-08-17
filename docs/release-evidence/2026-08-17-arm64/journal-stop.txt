@@ -1,0 +1,12 @@
+Aug 17 06:42:06 instance-20260813-1023 zl-expense[1580177]:  INFO role task started role="scheduler"
+Aug 17 06:42:06 instance-20260813-1023 zl-expense[1580177]:  INFO role task started role="maintenance"
+Aug 17 06:42:58 instance-20260813-1023 zl-expense[1580177]:  INFO received SIGTERM
+Aug 17 06:42:58 instance-20260813-1023 zl-expense[1580177]:  INFO marking readiness false before shutdown
+Aug 17 06:42:58 instance-20260813-1023 zl-expense[1580177]:  INFO role task stopped role="scheduler"
+Aug 17 06:42:58 instance-20260813-1023 zl-expense[1580177]:  INFO role task stopped role="maintenance"
+Aug 17 06:42:58 instance-20260813-1023 zl-expense[1580177]:  INFO role task stopped role="worker"
+Aug 17 06:42:58 instance-20260813-1023 systemd[1]: Stopping zl-expense.service - ZL Expense Bot...
+Aug 17 06:42:58 instance-20260813-1023 zl-expense[1580177]:  INFO runtime shutdown complete
+Aug 17 06:42:58 instance-20260813-1023 systemd[1]: zl-expense.service: Deactivated successfully.
+Aug 17 06:42:58 instance-20260813-1023 systemd[1]: Stopped zl-expense.service - ZL Expense Bot.
+Aug 17 06:42:58 instance-20260813-1023 systemd[1]: zl-expense.service: Consumed 1.724s CPU time, 2.9M memory peak, 0B memory swap peak.

@@ -1,0 +1,15 @@
+Aug 17 06:42:06 instance-20260813-1023 zl-expense[1579872]:  INFO marking readiness false before shutdown
+Aug 17 06:42:06 instance-20260813-1023 zl-expense[1579872]:  INFO role task stopped role="maintenance"
+Aug 17 06:42:06 instance-20260813-1023 zl-expense[1579872]:  INFO role task stopped role="scheduler"
+Aug 17 06:42:06 instance-20260813-1023 zl-expense[1579872]:  INFO role task stopped role="worker"
+Aug 17 06:42:06 instance-20260813-1023 zl-expense[1579872]:  INFO runtime shutdown complete
+Aug 17 06:42:06 instance-20260813-1023 systemd[1]: zl-expense.service: Deactivated successfully.
+Aug 17 06:42:06 instance-20260813-1023 systemd[1]: Stopped zl-expense.service - ZL Expense Bot.
+Aug 17 06:42:06 instance-20260813-1023 systemd[1]: Starting zl-expense.service - ZL Expense Bot...
+Aug 17 06:42:06 instance-20260813-1023 zl-expense[1580177]:  INFO relation "_sqlx_migrations" already exists, skipping
+Aug 17 06:42:06 instance-20260813-1023 zl-expense[1580177]:  INFO starting supervised runtime roles=[Ingress, Worker, Scheduler, Maintenance]
+Aug 17 06:42:06 instance-20260813-1023 zl-expense[1580177]:  INFO http server listening address=127.0.0.1:8088
+Aug 17 06:42:06 instance-20260813-1023 systemd[1]: Started zl-expense.service - ZL Expense Bot.
+Aug 17 06:42:06 instance-20260813-1023 zl-expense[1580177]:  INFO role task started role="worker"
+Aug 17 06:42:06 instance-20260813-1023 zl-expense[1580177]:  INFO role task started role="scheduler"
+Aug 17 06:42:06 instance-20260813-1023 zl-expense[1580177]:  INFO role task started role="maintenance"

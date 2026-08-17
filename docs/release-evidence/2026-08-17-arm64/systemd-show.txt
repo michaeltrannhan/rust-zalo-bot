@@ -1,0 +1,18 @@
+Type=notify
+NotifyAccess=main
+WatchdogUSec=30s
+MainPID=1579872
+NRestarts=0
+MemoryCurrent=2383872
+TasksCurrent=2
+CPUQuotaPerSecUSec=1s
+MemoryMax=402653184
+TasksMax=256
+ActiveState=active
+FragmentPath=/usr/lib/systemd/system/zl-expense.service
+=== drop-in ===
+[Service]
+CPUQuota=100%
+Environment=ZL_EXPENSE_CONFIG=/etc/zl-expense/config.toml
+ExecStart=
+ExecStart=/usr/bin/zl-expense --config /etc/zl-expense/config.toml run
