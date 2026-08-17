@@ -16,6 +16,7 @@ fn systemd_unit_has_hardening_and_resource_limits() {
         "MemoryMax=384M",
         "TasksMax=256",
         "PrivateTmp=true",
+        "ExecStart=/usr/bin/zl-expense --config /etc/zl-expense/config.toml run",
     ] {
         assert!(unit.contains(needle), "missing {needle}");
     }

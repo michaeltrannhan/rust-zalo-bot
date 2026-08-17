@@ -10,7 +10,8 @@ NotifyAccess=main
 WatchdogSec=30s
 User=zl-expense
 Group=zl-expense
-ExecStart=/usr/bin/zl-expense run
+ExecStart=/usr/bin/zl-expense --config /etc/zl-expense/config.toml run
+Environment=ZL_EXPENSE_CONFIG=/etc/zl-expense/config.toml
 EnvironmentFile=-/etc/zl-expense/environment
 
 StateDirectory=zl-expense
