@@ -71,7 +71,7 @@ Current paused-work handoff: `docs/engineering-handoff.md`.
 - [ ] M8 — Performance and security hardening
   - [x] Local: systemd `MemoryMax`/`TasksMax`, SBOM script, metrics privacy tests
   - [ ] Native amd64/arm64 resource measurements on the target profile
-  - [ ] Webhook load, mixed soak, crash matrix, media abuse, disk-full on hosts
+  - [ ] Webhook load, mixed soak, crash matrix, media abuse on hosts
 - [ ] M9 — Signed stable release and update
   - [x] Local: Ed25519 metadata signature, checksum, schema-gated rollback
   - [ ] Signed amd64/arm64 debs and tarballs produced on release hosts
@@ -168,6 +168,8 @@ before or immediately after integration.
   exercised in CI when those tools are absent.
 - `doctor --active zalo|gemini` can make live HTTP calls; Gemini refuses
   unless `api_base` is loopback.
+- Host disk-full / ENOSPC injection is out of scope for this product size
+  (recorded 2026-08-17). It is not an M8 release gate.
 - M8/M9 native Debian/Ubuntu amd64+arm64 resource, soak, signed-package,
   reboot, and host rollback evidence is still environment-limited.
 

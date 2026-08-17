@@ -497,7 +497,7 @@ Exit: an operator can identify a failed dependency/job, inspect redacted evidenc
 ### Milestone 8: performance and security hardening
 
 - Measure amd64 and arm64 release artifacts on the target profile.
-- Run webhook load, mixed workload soak, crash matrix, media abuse, dependency outage, and disk-full tests.
+- Run webhook load, mixed workload soak, crash matrix, media abuse, and dependency outage tests.
 - Tune pools, allocators only if measured, concurrency, timeouts, image handling, and release profile.
 - Validate systemd hardening and resource limits.
 - Run dependency/license/security audits and produce an SBOM.

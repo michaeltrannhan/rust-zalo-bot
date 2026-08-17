@@ -51,6 +51,10 @@ result, and reason — never by silent relaxation.
 | Graceful stop | ≤ 30 s, or jobs left for lease recovery are recorded |
 | Queue age after burst | Returns to baseline |
 
+Host disk-full injection is **out of scope** for this product size (2026-08-17).
+A dedicated ENOSPC drill is not a first-release gate. Object writes remain
+size-bounded; operators rely on ordinary host disk monitoring.
+
 ## Eight public test seams
 
 Confirmed 2026-08-15. Tests observe behavior only through these seams. Mock
