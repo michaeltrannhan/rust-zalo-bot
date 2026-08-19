@@ -1,0 +1,8 @@
+{
+  "event_name": "webhook.test",
+  "message": {
+    "date": 1787124248,
+    "message_id": "webhook-test",
+    "text": "Zalo Bot Platform webhook test - please respond with HTTP 200"
+  }
+}

@@ -25,8 +25,19 @@ pub struct Cli {
     #[arg(long, global = true, env = "ZL_EXPENSE_CONFIG")]
     pub config: Option<PathBuf>,
 
+    /// Log format: pretty (default) or json.
+    #[arg(long, global = true, env = "ZL_EXPENSE_LOG_FORMAT", default_value = "pretty")]
+    pub log_format: LogFormat,
+
     #[command(subcommand)]
     pub command: Commands,
+}
+
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum, PartialEq, Eq)]
+pub enum LogFormat {
+    #[default]
+    Pretty,
+    Json,
 }
 
 #[derive(Debug, Subcommand)]
@@ -216,7 +227,7 @@ pub enum DbCommands {
 
 /// Testable execution entrypoint for CLI commands.
 pub async fn execute(cli: Cli) -> ExitCode {
-    init_tracing();
+    init_tracing(cli.log_format);
 
     match run_command(cli).await {
         Ok(code) => code,
@@ -412,14 +423,26 @@ fn update_paths(
     }
 }
 
-fn init_tracing() {
+fn init_tracing(format: LogFormat) {
     use tracing_subscriber::EnvFilter;
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .without_time()
-        .try_init()
-        .ok();
+    match format {
+        LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .with_target(false)
+                .try_init()
+                .ok();
+        }
+        LogFormat::Pretty => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_target(false)
+                .without_time()
+                .try_init()
+                .ok();
+        }
+    }
 }

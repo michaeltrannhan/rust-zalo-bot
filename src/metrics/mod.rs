@@ -120,6 +120,13 @@ impl Metrics {
             append_gauge(&mut body, "outbound_ambiguous", ambiguous);
         }
 
+        let pool_size = pool.size() as i64;
+        let pool_idle = pool.num_idle() as i64;
+        let pool_active = (pool.size().saturating_sub(pool.num_idle() as u32)) as i64;
+        append_gauge(&mut body, "db_pool_size", pool_size);
+        append_gauge(&mut body, "db_pool_idle", pool_idle);
+        append_gauge(&mut body, "db_pool_active", pool_active);
+
         body
     }
 }

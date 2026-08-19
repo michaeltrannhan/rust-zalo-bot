@@ -254,6 +254,9 @@ impl ResolvedConfig {
     }
 
     fn read_credential(&self, reference: &str) -> Result<String, AppError> {
+        if !valid_credential_reference(reference) {
+            return Err(AppError::config("required credential is unavailable"));
+        }
         let value = fs::read_to_string(self.credentials_directory.join(reference))
             .map_err(|_| AppError::config("required credential is unavailable"))?;
         let value = value.trim();
@@ -1404,11 +1407,18 @@ fn validate_zalo_api_base(value: &str) -> Result<(), AppError> {
 }
 
 fn valid_credential_reference(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
+    if value.is_empty()
+        || value.len() > 64
+        || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return false;
+    }
+    let path = Path::new(value);
+    let mut components = path.components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
 }
 
 /// Resolve database URL from credential file or TEST_DATABASE_URL / ZL_EXPENSE_DATABASE_URL env.

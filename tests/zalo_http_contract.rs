@@ -219,6 +219,21 @@ fn unsupported_event_is_observable() {
 }
 
 #[test]
+fn zalo_platform_webhook_test_probe_is_unsupported() {
+    let adapter =
+        ZaloHttpAdapter::new(test_config("http://unused", "tok", "sec")).expect("adapter");
+    let body = fixture("webhook_test.json");
+    let event = adapter.parse_text_webhook(&body).expect("parse");
+    assert_eq!(
+        event.kind,
+        InboundEventKind::Unsupported("webhook.test".to_string())
+    );
+    assert_eq!(event.event_id, "webhook-test");
+    assert!(event.sender_id.is_empty());
+    assert!(event.chat_id.is_empty());
+}
+
+#[test]
 fn malformed_known_event_is_validation() {
     let adapter =
         ZaloHttpAdapter::new(test_config("http://unused", "tok", "sec")).expect("adapter");

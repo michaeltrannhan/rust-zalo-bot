@@ -333,6 +333,42 @@ async fn authenticated_webhook_returns_stable_status_for_rejected_inputs() {
 }
 
 #[tokio::test]
+async fn zalo_platform_webhook_test_probe_returns_ok() {
+    let Some(database_url) =
+        common::skip_without_database("zalo_platform_webhook_test_probe_returns_ok")
+    else {
+        return;
+    };
+
+    let pool = isolated_pool(&database_url).await;
+    let harness = spawn_webhook_harness(
+        pool.clone(),
+        BTreeSet::from([ALLOWED_SENDER.to_string()]),
+        512,
+    )
+    .await;
+    let body = json!({
+        "event_name": "webhook.test",
+        "message": {
+            "date": 1787124248,
+            "message_id": "webhook-test",
+            "text": "Zalo Bot Platform webhook test - please respond with HTTP 200"
+        }
+    });
+    let (status, value) = harness.status_field(harness.post_json(&body).await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value, "unsupported");
+
+    let inbound_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbound_events")
+        .fetch_one(&pool)
+        .await
+        .expect("inbound count");
+    assert_eq!(inbound_count, 0);
+
+    harness.abort();
+}
+
+#[tokio::test]
 async fn allowlist_denial_queues_one_deterministic_reply_without_account() {
     let Some(database_url) = common::skip_without_database(
         "allowlist_denial_queues_one_deterministic_reply_without_account",

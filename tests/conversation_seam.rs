@@ -269,6 +269,26 @@ fn vnd_formatting_and_amount_rejection() {
         (45000, "VND".to_string())
     );
     assert_eq!(
+        parse_amount("1tr5", "VND").unwrap(),
+        (1500000, "VND".to_string())
+    );
+    assert_eq!(
+        parse_amount("1tr500k", "VND").unwrap(),
+        (1500000, "VND".to_string())
+    );
+    assert_eq!(
+        parse_amount("2k5", "VND").unwrap(),
+        (2500, "VND".to_string())
+    );
+    assert_eq!(
+        parse_amount("1củ5", "VND").unwrap(),
+        (1500000, "VND".to_string())
+    );
+    assert_eq!(
+        parse_amount("1cu5", "VND").unwrap(),
+        (1500000, "VND".to_string())
+    );
+    assert_eq!(
         parse_amount("-150k", "VND").unwrap_err(),
         AmountError::Negative
     );

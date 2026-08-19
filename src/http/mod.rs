@@ -20,7 +20,7 @@ use crate::ingress::{
     process_text_command,
 };
 use crate::metrics::Metrics;
-use crate::provider::{InboundEventKind, SECRET_HEADER, ZaloHttpAdapter};
+use crate::provider::{EVENT_IMAGE_RECEIVED, InboundEventKind, SECRET_HEADER, ZaloHttpAdapter};
 
 /// Authenticated Zalo webhook application service.
 pub struct WebhookService {
@@ -140,6 +140,13 @@ async fn zalo_webhook_handler(
             }
             Err(_) => status_json(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };
+    }
+
+    if matches!(
+        &text_event.kind,
+        InboundEventKind::Unsupported(event_name) if event_name != EVENT_IMAGE_RECEIVED
+    ) {
+        return status_json(StatusCode::OK, "unsupported");
     }
 
     let image_event = match service.adapter.parse_image_webhook(&bytes) {

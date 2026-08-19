@@ -10,6 +10,17 @@ pub enum AmountError {
     NotWholeMinorUnit,
 }
 
+const MULTIPLIERS: [(&str, i64); 6] = [
+    ("triệu", 1_000_000),
+    ("trieu", 1_000_000),
+    ("củ", 1_000_000),
+    ("cu", 1_000_000),
+    ("tr", 1_000_000),
+    ("k", 1_000),
+];
+
+const CURRENCY_SYMBOLS: [(&str, &str); 3] = [("A$", "AUD"), ("₫", "VND"), ("$", "USD")];
+
 /// Parse a chat amount token into minor units and ISO currency.
 pub fn parse_amount(raw: &str, currency_hint: &str) -> Result<(i64, String), AmountError> {
     let s = raw.trim();
@@ -20,8 +31,61 @@ pub fn parse_amount(raw: &str, currency_hint: &str) -> Result<(i64, String), Amo
         return Err(AmountError::Negative);
     }
 
-    let (currency, mut body) = detect_currency(s, currency_hint);
+    let (currency, body) = detect_currency(s, currency_hint);
+
+    if let Some(compound) = try_parse_compound(&body, &currency) {
+        return compound;
+    }
+
+    parse_single_amount(&body, &currency)
+}
+
+fn try_parse_compound(body: &str, currency: &str) -> Option<Result<(i64, String), AmountError>> {
+    let lower = body.to_lowercase();
+    for (mult_str, _) in MULTIPLIERS {
+        if let Some(pos) = lower.find(mult_str) {
+            if pos == 0 {
+                continue;
+            }
+            let before = lower[..pos].trim();
+            let after = lower[pos + mult_str.len()..].trim();
+
+            if before.is_empty() || after.is_empty() {
+                continue;
+            }
+
+            let before_is_digits = before
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == ',');
+            if !before_is_digits {
+                continue;
+            }
+
+            let after_is_pure_digits = after.chars().all(|c| c.is_ascii_digit());
+            if after_is_pure_digits {
+                let rewritten = format!("{}.{}{}", before, after, mult_str);
+                return Some(parse_single_amount(&rewritten, currency));
+            }
+
+            let before_token = format!("{}{}", before, mult_str);
+            if let Ok((val_before, _)) = parse_single_amount(&before_token, currency)
+                && let Ok((val_after, _)) = parse_amount(after, currency)
+            {
+                let total = val_before.checked_add(val_after);
+                return Some(
+                    total
+                        .map(|v| (v, currency.to_string()))
+                        .ok_or(AmountError::TooLarge),
+                );
+            }
+        }
+    }
+    None
+}
+
+fn parse_single_amount(body: &str, currency: &str) -> Result<(i64, String), AmountError> {
     let mut factor: i64 = 1;
+    let mut body = body.trim().to_string();
 
     let lower = body.to_lowercase();
     for (suffix, mult) in MULTIPLIERS {
@@ -44,8 +108,8 @@ pub fn parse_amount(raw: &str, currency_hint: &str) -> Result<(i64, String), Amo
         return Err(AmountError::NoDigits);
     }
 
-    if currency_decimal_places(&currency) == 0 && factor == 1 {
-        return finish_amount(&strip_separators(&digits_only), &currency, factor);
+    if currency_decimal_places(currency) == 0 && factor == 1 {
+        return finish_amount(&strip_separators(&digits_only), currency, factor);
     }
 
     let last = digits_only
@@ -59,7 +123,7 @@ pub fn parse_amount(raw: &str, currency_hint: &str) -> Result<(i64, String), Amo
     if let Some(last_idx) = last {
         let sep = digits_only.as_bytes()[last_idx];
         let frac = strip_separators(&digits_only[last_idx + 1..]);
-        if currency_decimal_places(&currency) == 0 {
+        if currency_decimal_places(currency) == 0 {
             if !frac.is_empty() && frac.len() != 3 {
                 decimal_at = Some(last_idx);
             }
@@ -69,7 +133,7 @@ pub fn parse_amount(raw: &str, currency_hint: &str) -> Result<(i64, String), Amo
     }
 
     if decimal_at.is_none() {
-        return finish_amount(&strip_separators(&digits_only), &currency, factor);
+        return finish_amount(&strip_separators(&digits_only), currency, factor);
     }
 
     let at = decimal_at.unwrap();
@@ -85,7 +149,7 @@ pub fn parse_amount(raw: &str, currency_hint: &str) -> Result<(i64, String), Amo
     let combined = parse_digits(&(int_digits + &frac_digits))?;
     let n = frac_digits.len();
 
-    if currency_decimal_places(&currency) == 0 {
+    if currency_decimal_places(currency) == 0 {
         let scale = 10_i64.pow(n as u32);
         if factor > 1 && combined > i64::MAX / factor {
             return Err(AmountError::TooLarge);
@@ -94,10 +158,10 @@ pub fn parse_amount(raw: &str, currency_hint: &str) -> Result<(i64, String), Amo
         if value % scale != 0 {
             return Err(AmountError::NotWholeMinorUnit);
         }
-        return Ok((value / scale, currency));
+        return Ok((value / scale, currency.to_string()));
     }
 
-    let places = currency_decimal_places(&currency) as usize;
+    let places = currency_decimal_places(currency) as usize;
     if n > places {
         return Err(AmountError::NotWholeMinorUnit);
     }
@@ -111,7 +175,7 @@ pub fn parse_amount(raw: &str, currency_hint: &str) -> Result<(i64, String), Amo
     if factor > 1 && minor > i64::MAX / factor {
         return Err(AmountError::TooLarge);
     }
-    Ok((minor * factor, currency))
+    Ok((minor * factor, currency.to_string()))
 }
 
 fn finish_amount(digits: &str, currency: &str, factor: i64) -> Result<(i64, String), AmountError> {
@@ -158,7 +222,3 @@ fn detect_currency(s: &str, hint: &str) -> (String, String) {
     };
     (currency, s.to_string())
 }
-
-const MULTIPLIERS: [(&str, i64); 3] = [("triệu", 1_000_000), ("tr", 1_000_000), ("k", 1_000)];
-
-const CURRENCY_SYMBOLS: [(&str, &str); 3] = [("A$", "AUD"), ("₫", "VND"), ("$", "USD")];

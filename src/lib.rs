@@ -21,7 +21,7 @@ pub mod schedule;
 pub mod update;
 pub mod work;
 
-pub use cli::{Cli, execute};
+pub use cli::{Cli, LogFormat, execute};
 pub use config::{Config, ConfigSource, ResolvedConfig};
 pub use error::{AppError, ErrorClass, ExitCode};
 pub use receipt::{

@@ -241,6 +241,9 @@ fn credential_reader_returns_value_without_exposing_it_on_failure() {
         resolved.read_zalo_bot_token().expect("token"),
         "secret-bot-token"
     );
+    assert!(resolved.read_named_credential("../foo").is_err());
+    assert!(resolved.read_named_credential("/abs/path").is_err());
+    assert!(resolved.read_named_credential("nested/sub").is_err());
     let err = resolved.read_webhook_secret().expect_err("missing secret");
     assert_eq!(err.message, "required credential is unavailable");
     assert!(
