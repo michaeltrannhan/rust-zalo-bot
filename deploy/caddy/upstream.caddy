@@ -1,0 +1,2 @@
+# Default inactive-safe upstream. host-slot-deploy.sh replaces this file.
+reverse_proxy 127.0.0.1:8081

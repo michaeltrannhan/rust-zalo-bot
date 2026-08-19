@@ -1,0 +1,64 @@
+# Optional maintainer CD for one already-provisioned Linux VM.
+# Not the public install path. Users install a signed package; see
+# docs/operator-install.md.
+name: Operator VM deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04-arm
+    environment: operator-vm
+    concurrency:
+      group: deploy-operator-vm
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require deploy secrets
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+        run: |
+          if [ -z "${KEY}" ] || [ -z "${HOST}" ]; then
+            echo "Set DEPLOY_SSH_PRIVATE_KEY and DEPLOY_SSH_HOST. This workflow is optional maintainer CD, not the product install path."
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Release build
+        run: cargo build --release --locked
+      - name: Debian package
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dpkg-dev rsync
+          ./scripts/package-dev.sh
+      - name: Install SSH key
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+        run: |
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > ~/.ssh/deploy.key
+          chmod 600 ~/.ssh/deploy.key
+          if [ -n "${DEPLOY_SSH_KNOWN_HOSTS}" ]; then
+            printf '%s\n' "${DEPLOY_SSH_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -H "${DEPLOY_SSH_HOST}" >> ~/.ssh/known_hosts
+          fi
+          chmod 644 ~/.ssh/known_hosts
+      - name: Slot deploy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_SSH_USER }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=packaging/version.env
+          source packaging/version.env
+          export DEPLOY_HOST
+          export DEPLOY_USER="${DEPLOY_USER:-ubuntu}"
+          export SSH_IDENTITY="${HOME}/.ssh/deploy.key"
+          ./scripts/remote-deploy.sh "dist/${PACKAGE_NAME}_${PACKAGE_VERSION}_arm64.deb"

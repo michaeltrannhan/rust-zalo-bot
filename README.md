@@ -31,7 +31,14 @@ Credential references resolve from `credentials.directory` in config. For CI and
 | Outbound delivery concurrency | 4 |
 | Original receipt retention | 7 days (1–30) |
 
-Environment overrides use the `ZL_EXPENSE_*` prefix with source attribution in `config show`. Secret values are never printed.
+Environment overrides use the `ZL_EXPENSE_*` prefix with source attribution in
+`config show`. Secret values are never printed.
+
+## Install
+
+Production hosts install a versioned Debian package or portable bundle. See
+`docs/operator-install.md`. Optional blue/green cutover:
+`docs/zero-downtime-deploy.md`.
 
 ## Exit codes
 

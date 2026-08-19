@@ -1,0 +1,54 @@
+[Unit]
+Description=ZL Expense Bot (%i slot)
+Documentation=file:/usr/share/doc/zl-expense/operator-install.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=30s
+User=zl-expense
+Group=zl-expense
+ExecStart=/usr/bin/zl-expense --config /etc/zl-expense/config.toml run
+Environment=ZL_EXPENSE_CONFIG=/etc/zl-expense/config.toml
+EnvironmentFile=-/etc/zl-expense/environment
+EnvironmentFile=-/etc/zl-expense/slots/%i.env
+
+StateDirectory=zl-expense
+RuntimeDirectory=zl-expense-%i
+StateDirectoryMode=0750
+RuntimeDirectoryMode=0750
+
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+MemoryMax=384M
+TasksMax=256
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zl-expense-%i
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+UMask=0077
+
+ReadWritePaths=/var/lib/zl-expense /run/zl-expense-%i
+
+[Install]
+WantedBy=multi-user.target

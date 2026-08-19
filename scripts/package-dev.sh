@@ -53,6 +53,22 @@ stage_operator_docs() {
         stage_file 0644 "${ROOT}/deploy/caddy/Caddyfile" \
             "${deploy_dir}/caddy/Caddyfile"
     fi
+    if [ -f "${ROOT}/deploy/caddy/origin.caddy" ]; then
+        stage_file 0644 "${ROOT}/deploy/caddy/origin.caddy" \
+            "${deploy_dir}/caddy/origin.caddy"
+    fi
+    if [ -f "${ROOT}/deploy/caddy/upstream.caddy" ]; then
+        stage_file 0644 "${ROOT}/deploy/caddy/upstream.caddy" \
+            "${deploy_dir}/caddy/upstream.caddy"
+    fi
+    if [ -f "${ROOT}/scripts/host-slot-deploy.sh" ]; then
+        stage_file 0755 "${ROOT}/scripts/host-slot-deploy.sh" \
+            "${deploy_dir}/host-slot-deploy.sh"
+    fi
+    if [ -f "${ROOT}/scripts/lib/slot-deploy.sh" ]; then
+        stage_file 0644 "${ROOT}/scripts/lib/slot-deploy.sh" \
+            "${deploy_dir}/slot-deploy.sh"
+    fi
     if [ -f "${ROOT}/deploy/minio/compose.minio.yaml" ]; then
         stage_file 0644 "${ROOT}/deploy/minio/compose.minio.yaml" \
             "${deploy_dir}/minio/compose.minio.yaml"
@@ -81,6 +97,8 @@ stage_tree "${MIGRATIONS_SRC}" "${DEB_STAGING}/usr/share/zl-expense/migrations" 
 stage_file 0644 "${CONFIG_EXAMPLE}" "${DEB_STAGING}/usr/share/zl-expense/config.example.toml"
 stage_file 0644 "${ROOT}/deploy/systemd/zl-expense.service" \
     "${DEB_STAGING}/lib/systemd/system/zl-expense.service"
+stage_file 0644 "${ROOT}/deploy/systemd/zl-expense@.service" \
+    "${DEB_STAGING}/lib/systemd/system/zl-expense@.service"
 
 stage_operator_docs "${DEB_STAGING}/usr/share/doc/zl-expense" \
     "${DEB_STAGING}/usr/share/zl-expense/deploy"
@@ -120,6 +138,8 @@ stage_tree "${MIGRATIONS_SRC}" "${TARBALL_ROOT}/share/migrations" 0644 0755
 stage_file 0644 "${CONFIG_EXAMPLE}" "${TARBALL_ROOT}/share/config.example.toml"
 stage_file 0644 "${ROOT}/deploy/systemd/zl-expense.service" \
     "${TARBALL_ROOT}/systemd/zl-expense.service"
+stage_file 0644 "${ROOT}/deploy/systemd/zl-expense@.service" \
+    "${TARBALL_ROOT}/systemd/zl-expense@.service"
 
 stage_operator_docs "${TARBALL_ROOT}/doc" "${TARBALL_ROOT}/deploy"
 

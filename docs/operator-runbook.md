@@ -97,7 +97,9 @@ zl-expense logs --follow
 zl-expense logs --since "1 hour ago"
 ```
 
-Uses `journalctl -u zl-expense.service` when systemd is available.
+Uses `journalctl -u zl-expense.service` when systemd is available. Optional
+slot units use `zl-expense@blue.service` / `zl-expense@green.service`; see
+`docs/zero-downtime-deploy.md`.
 
 ## Incident checklist
 

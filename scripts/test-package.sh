@@ -80,7 +80,11 @@ run_shellcheck() {
         "${ROOT}/scripts/package-dev.sh" \
         "${ROOT}/scripts/test-package.sh" \
         "${ROOT}/scripts/generate-sbom.sh" \
-        "${ROOT}/scripts/security-audit.sh"
+        "${ROOT}/scripts/security-audit.sh" \
+        "${ROOT}/scripts/lib/slot-deploy.sh" \
+        "${ROOT}/scripts/host-slot-deploy.sh" \
+        "${ROOT}/scripts/remote-deploy.sh" \
+        "${ROOT}/scripts/test-slot-deploy.sh"
 }
 
 build_packages() {
@@ -130,6 +134,12 @@ validate_archive_contents() {
             || fail 'deb missing migration'
         dpkg-deb -c "${deb_file}" | grep -q './lib/systemd/system/zl-expense.service' \
             || fail 'deb missing systemd unit'
+        dpkg-deb -c "${deb_file}" | grep -q './lib/systemd/system/zl-expense@.service' \
+            || fail 'deb missing slot systemd unit'
+        dpkg-deb -c "${deb_file}" | grep -q './usr/share/zl-expense/deploy/caddy/origin.caddy' \
+            || fail 'deb missing Caddy origin profile'
+        dpkg-deb -c "${deb_file}" | grep -q './usr/share/zl-expense/deploy/host-slot-deploy.sh' \
+            || fail 'deb missing host slot deploy script'
         dpkg-deb -c "${deb_file}" | grep -q './usr/share/zl-expense/deploy/caddy/Caddyfile' \
             || fail 'deb missing Caddy profile'
         dpkg-deb -c "${deb_file}" | grep -q './usr/share/doc/zl-expense/operator-runbook.md' \
@@ -148,11 +158,14 @@ validate_archive_contents() {
             bash -euo pipefail -c '
                 apt-get update -qq
                 apt-get install -y -qq dpkg-dev >/dev/null
-                dpkg-deb -c /pkg.deb | grep -q "./usr/bin/zl-expense$"
-                dpkg-deb -c /pkg.deb | grep -q "./usr/share/zl-expense/migrations/0001_init.sql"
-                dpkg-deb -c /pkg.deb | grep -q "./lib/systemd/system/zl-expense.service"
-                dpkg-deb -c /pkg.deb | grep "./usr/bin/zl-expense" | grep -q "rwxr-xr-x"
-                dpkg-deb -c /pkg.deb | grep "./usr/share/zl-expense/migrations/0001_init.sql" | grep -q "rw-r--r--"
+                dpkg-deb -c /pkg.deb > /tmp/deb.list
+                grep -q "./usr/bin/zl-expense$" /tmp/deb.list
+                grep -q "./usr/share/zl-expense/migrations/0001_init.sql" /tmp/deb.list
+                grep -q "./lib/systemd/system/zl-expense.service" /tmp/deb.list
+                grep -q "./lib/systemd/system/zl-expense@.service" /tmp/deb.list
+                grep -q "./usr/share/zl-expense/deploy/caddy/origin.caddy" /tmp/deb.list
+                grep "./usr/bin/zl-expense" /tmp/deb.list | grep -q "rwxr-xr-x"
+                grep "./usr/share/zl-expense/migrations/0001_init.sql" /tmp/deb.list | grep -q "rw-r--r--"
             '
     else
         fail "cannot validate deb without dpkg-deb or docker"
@@ -168,6 +181,9 @@ validate_archive_contents() {
         "${PACKAGE_NAME}-${PACKAGE_VERSION}-${DEB_ARCH}/systemd/zl-expense.service" \
         || fail 'tarball missing systemd unit'
     tar -tzf "${tar_file}" | grep -q \
+        "${PACKAGE_NAME}-${PACKAGE_VERSION}-${DEB_ARCH}/systemd/zl-expense@.service" \
+        || fail 'tarball missing slot systemd unit'
+    tar -tzf "${tar_file}" | grep -q \
         "${PACKAGE_NAME}-${PACKAGE_VERSION}-${DEB_ARCH}/deploy/caddy/Caddyfile" \
         || fail 'tarball missing Caddy profile'
     tar -tzf "${tar_file}" | grep -q \
@@ -182,16 +198,18 @@ validate_systemd_unit() {
     log "validating systemd unit syntax"
     if command -v systemd-analyze >/dev/null 2>&1; then
         systemd-analyze verify "${unit_path}"
-    else
-        grep -q '^Type=notify' "${unit_path}" || fail 'expected Type=notify'
-        grep -q '^NotifyAccess=main' "${unit_path}" || fail 'missing NotifyAccess=main'
-        grep -q '^WatchdogSec=30s' "${unit_path}" || fail 'missing WatchdogSec=30s'
-        grep -q '^User=zl-expense' "${unit_path}" || fail 'missing User=zl-expense'
-        grep -q '^TimeoutStopSec=30s' "${unit_path}" || fail 'missing TimeoutStopSec=30s'
-        grep -q '^NoNewPrivileges=true' "${unit_path}" || fail 'missing NoNewPrivileges'
-        grep -q '^MemoryMax=384M' "${unit_path}" || fail 'missing MemoryMax=384M'
-        grep -q '^TasksMax=256' "${unit_path}" || fail 'missing TasksMax=256'
+        systemd-analyze verify "${ROOT}/deploy/systemd/zl-expense@.service" || true
     fi
+    grep -q '^Type=notify' "${unit_path}" || fail 'expected Type=notify'
+    grep -q '^NotifyAccess=main' "${unit_path}" || fail 'missing NotifyAccess=main'
+    grep -q '^WatchdogSec=30s' "${unit_path}" || fail 'missing WatchdogSec=30s'
+    grep -q '^User=zl-expense' "${unit_path}" || fail 'missing User=zl-expense'
+    grep -q '^TimeoutStopSec=30s' "${unit_path}" || fail 'missing TimeoutStopSec=30s'
+    grep -q '^NoNewPrivileges=true' "${unit_path}" || fail 'missing NoNewPrivileges'
+    grep -q '^MemoryMax=384M' "${unit_path}" || fail 'missing MemoryMax=384M'
+    grep -q '^TasksMax=256' "${unit_path}" || fail 'missing TasksMax=256'
+    grep -q 'RuntimeDirectory=zl-expense-%i' "${ROOT}/deploy/systemd/zl-expense@.service" \
+        || fail 'slot unit missing per-instance RuntimeDirectory'
 }
 
 run_docker_install_test() {
@@ -237,6 +255,7 @@ main() {
     validate_archive_contents
     validate_systemd_unit
     run_docker_install_test
+    "${ROOT}/scripts/test-slot-deploy.sh"
     log "all package tests passed"
 }
 

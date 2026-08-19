@@ -3,21 +3,29 @@ set -e
 
 SERVICE_NAME=zl-expense
 
-stop_service() {
+stop_units() {
     if [ ! -d /run/systemd/system ]; then
         return 0
     fi
     if ! command -v systemctl >/dev/null 2>&1; then
         return 0
     fi
-    if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
-        systemctl stop "${SERVICE_NAME}.service" || true
-    fi
+    for unit in \
+        "${SERVICE_NAME}.service" \
+        "${SERVICE_NAME}@blue.service" \
+        "${SERVICE_NAME}@green.service"; do
+        if systemctl is-active --quiet "${unit}"; then
+            systemctl stop "${unit}" || true
+        fi
+    done
 }
 
 case "${1:-}" in
-remove|upgrade|deconfigure)
-    stop_service
+remove | deconfigure)
+    stop_units
+    ;;
+upgrade)
+    # Keep the running inode so blue/green cutover can start the new slot first.
     ;;
 esac
 

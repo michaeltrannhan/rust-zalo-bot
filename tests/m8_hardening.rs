@@ -23,6 +23,24 @@ fn systemd_unit_has_hardening_and_resource_limits() {
 }
 
 #[test]
+fn slot_unit_uses_per_instance_runtime_directory() {
+    let unit = fs::read_to_string("deploy/systemd/zl-expense@.service").expect("template");
+    for needle in [
+        "RuntimeDirectory=zl-expense-%i",
+        "ReadWritePaths=/var/lib/zl-expense /run/zl-expense-%i",
+        "EnvironmentFile=-/etc/zl-expense/slots/%i.env",
+        "TimeoutStopSec=30s",
+        "MemoryMax=384M",
+    ] {
+        assert!(unit.contains(needle), "missing {needle}");
+    }
+    assert!(
+        !unit.contains("RuntimeDirectory=zl-expense\n"),
+        "slot units must not share /run/zl-expense"
+    );
+}
+
+#[test]
 fn example_config_keeps_telemetry_off_and_records_update_paths() {
     let example = fs::read_to_string("config/config.example.toml").expect("example");
     assert!(example.contains("[metrics]"));

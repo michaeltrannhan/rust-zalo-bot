@@ -156,6 +156,10 @@ range still covers the database. Otherwise the command stops and points at the b
 
 Public keys live in `/etc/zl-expense/update-keys/` (64-character hex verifying keys).
 
+Optional blue/green cutover (stable loopback origin, two systemd slots) is
+documented in `docs/zero-downtime-deploy.md`. It is not required for a
+normal self-hosted install.
+
 Package install remains available:
 
 ```bash

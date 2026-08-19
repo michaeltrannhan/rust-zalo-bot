@@ -40,9 +40,12 @@ ensure_user() {
 
 configure_paths() {
     install -d -m 0755 -o root -g root "${CONFIG_DIR}"
+    install -d -m 0755 -o root -g root "${CONFIG_DIR}/slots"
+    install -d -m 0755 -o root -g root "${CONFIG_DIR}/caddy"
     install -d -m 0750 -o root -g "${SERVICE_GROUP}" "${CREDENTIALS_DIR}"
     install -d -m 0750 -o root -g "${SERVICE_GROUP}" "${CONFIG_DIR}/update-keys"
     install -d -m 0750 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" /var/lib/zl-expense/update
+    install -d -m 0750 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" /var/lib/zl-expense/deploy
 
     if [ ! -f "${CONFIG_FILE}" ] && [ -f "${CONFIG_EXAMPLE}" ]; then
         install -m 0644 -o root -g root "${CONFIG_EXAMPLE}" "${CONFIG_FILE}"
@@ -58,6 +61,10 @@ systemd_refresh() {
     fi
 
     systemctl daemon-reload || true
+
+    if [ -f /var/lib/zl-expense/deploy/active-slot ]; then
+        return 0
+    fi
 
     if command -v deb-systemd-helper >/dev/null 2>&1; then
         deb-systemd-helper update-state "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
