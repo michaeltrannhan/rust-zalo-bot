@@ -245,6 +245,16 @@ pub fn extraction_kill_switch_text() -> String {
     "Trích xuất hóa đơn đang tạm tắt.".to_string()
 }
 
+pub fn extraction_failed_text() -> String {
+    "Tôi chưa đọc được hóa đơn này. Bạn gửi lại ảnh rõ hơn, hoặc nhập tay kiểu \"cafe 45k\" nhé."
+        .to_string()
+}
+
+pub fn extraction_unsupported_text() -> String {
+    "Ảnh này không giống hóa đơn. Gửi lại ảnh hóa đơn, hoặc nhập tay kiểu \"cafe 45k\"."
+        .to_string()
+}
+
 pub fn transaction_type_label(transaction_type: &str) -> &'static str {
     match transaction_type {
         "income" => "Thu nhập",

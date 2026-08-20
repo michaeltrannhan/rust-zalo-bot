@@ -57,21 +57,21 @@ directory = "/var/lib/zl-expense/objects"
 # force_path_style = true
 
 [extraction]
-backend = "fake"
+backend = "gemini"
 default_profile = "receipt-fast"
 api_base = "https://generativelanguage.googleapis.com"
 
-# Named Gemini profiles (required when extraction.backend = "gemini"):
-# [[ai.profiles]]
-# name = "receipt-fast"
-# provider = "gemini"
-# model = "gemini-2.5-flash"
-# credential = "gemini-receipt-fast"
-# task = "extraction"
-# timeout_seconds = 30
-# max_input_bytes = 4194304
-# thinking_effort = "none"
-# schema_version = "v1"
+[[ai.profiles]]
+name = "receipt-fast"
+provider = "gemini"
+model = "gemini-3.6-flash"
+credential = "gemini-receipt-fast"
+task = "extraction"
+timeout_seconds = 90
+max_input_bytes = 4194304
+max_output_tokens = 8192
+thinking_effort = "high"
+schema_version = "v1"
 
 [zalo]
 bot_token_credential = "zalo-bot"

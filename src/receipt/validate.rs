@@ -11,6 +11,10 @@ pub const MAX_PIXEL_COUNT: u64 = 25_000_000;
 const ALLOWED_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/webp"];
 
 /// Validate bytes and MIME, compute SHA-256, and read dimensions without full decode.
+///
+/// Declared Content-Type is advisory: Zalo CDN often sends non-standard
+/// `image/jpg` (and sometimes `application/octet-stream`). Acceptance is driven
+/// by magic-byte sniff, matching the legacy Go validator.
 pub fn validate_image(bytes: &[u8], mime_type: &str) -> Result<ValidatedImage, ReceiptError> {
     if bytes.is_empty() {
         return Err(ReceiptError::validation("image bytes must not be empty"));
@@ -18,18 +22,18 @@ pub fn validate_image(bytes: &[u8], mime_type: &str) -> Result<ValidatedImage, R
     if bytes.len() > MAX_IMAGE_BYTES {
         return Err(ReceiptError::validation("image exceeds maximum size"));
     }
-    let normalized_mime = mime_type.trim().to_ascii_lowercase();
-    if !ALLOWED_MIME_TYPES.contains(&normalized_mime.as_str()) {
-        return Err(ReceiptError::unsupported("unsupported image mime type"));
-    }
 
     let sniffed = sniffed_image_mime(bytes)
         .ok_or_else(|| ReceiptError::validation("image content does not match a supported type"))?;
-    if sniffed != normalized_mime {
+    let declared = normalize_declared_image_mime(mime_type);
+    if let Some(declared) = declared
+        && declared != sniffed
+    {
         return Err(ReceiptError::validation(
             "image content does not match declared mime type",
         ));
     }
+    let normalized_mime = sniffed.to_string();
 
     let dimensions = imagesize::blob_size(bytes)
         .map_err(|_| ReceiptError::validation("unable to read image dimensions"))?;
@@ -82,6 +86,31 @@ fn sniffed_image_mime(bytes: &[u8]) -> Option<&'static str> {
         return Some("image/webp");
     }
     None
+}
+
+/// Normalize a provider Content-Type into a canonical image MIME, or `None` when
+/// the header is missing/generic so sniff can decide.
+fn normalize_declared_image_mime(mime_type: &str) -> Option<&'static str> {
+    let primary = mime_type
+        .split(';')
+        .next()
+        .unwrap_or(mime_type)
+        .trim()
+        .to_ascii_lowercase();
+    match primary.as_str() {
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/webp" => Some("image/webp"),
+        "" | "application/octet-stream" | "binary/octet-stream" | "application/binary" => None,
+        other if ALLOWED_MIME_TYPES.contains(&other) => {
+            // Keep allowlist exhaustive even if match arms drift.
+            ALLOWED_MIME_TYPES
+                .iter()
+                .copied()
+                .find(|allowed| *allowed == other)
+        }
+        _ => None,
+    }
 }
 
 /// Deterministic object key for a stored receipt asset.
@@ -167,9 +196,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_mime() {
-        let error = validate_image(&[1, 2, 3], "text/plain").expect_err("mime");
-        assert_eq!(error.class, crate::error::ErrorClass::Unsupported);
+    fn rejects_unsupported_payload_bytes() {
+        let error = validate_image(&[1, 2, 3], "text/plain").expect_err("sniff");
+        assert_eq!(error.class, crate::error::ErrorClass::Validation);
     }
 
     #[test]
@@ -189,6 +218,24 @@ mod tests {
         let error = validate_image(TINY_JPEG, "image/png").expect_err("mismatch");
         assert_eq!(error.class, crate::error::ErrorClass::Validation);
         let error = validate_image(TINY_WEBP, "image/png").expect_err("mismatch");
+        assert_eq!(error.class, crate::error::ErrorClass::Validation);
+    }
+
+    #[test]
+    fn accepts_zalo_image_jpg_alias_and_octet_stream() {
+        let jpeg = validate_image(TINY_JPEG, "image/jpg").expect("jpg alias");
+        assert_eq!(jpeg.mime_type, "image/jpeg");
+        let jpeg = validate_image(TINY_JPEG, "image/jpg; charset=binary").expect("jpg params");
+        assert_eq!(jpeg.mime_type, "image/jpeg");
+        let jpeg = validate_image(TINY_JPEG, "application/octet-stream").expect("octet-stream");
+        assert_eq!(jpeg.mime_type, "image/jpeg");
+        let jpeg = validate_image(TINY_JPEG, "").expect("empty declared");
+        assert_eq!(jpeg.mime_type, "image/jpeg");
+    }
+
+    #[test]
+    fn rejects_unsupported_sniff_even_with_declared_jpeg() {
+        let error = validate_image(&[1, 2, 3, 4], "image/jpeg").expect_err("sniff");
         assert_eq!(error.class, crate::error::ErrorClass::Validation);
     }
 

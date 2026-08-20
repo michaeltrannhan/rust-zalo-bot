@@ -1607,7 +1607,8 @@ pub async fn enqueue_outbound_in_transaction(
             }),
             dedupe_key: job_dedupe_key,
             serialization_key: Some(serialization_key),
-            priority: 0,
+            // Above receipt ingest/extract so chat replies are not starved by OCR.
+            priority: 10,
             run_at: Utc::now(),
             max_attempts: 10,
         },

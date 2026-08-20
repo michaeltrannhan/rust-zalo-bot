@@ -210,13 +210,15 @@ async fn success_maps_json_and_records_tokens() {
     assert_eq!(attempt.meta.input_tokens, Some(100));
     assert_eq!(attempt.meta.output_tokens, Some(40));
     assert_eq!(attempt.meta.provider, "gemini");
-    assert_eq!(attempt.meta.prompt_version, "extraction-json-v1");
+    assert_eq!(attempt.meta.prompt_version, "extraction-json-v2");
 
     let (method, path, body) = recorded.lock().expect("lock").clone().expect("recorded");
     assert_eq!(method, "POST");
     assert_eq!(path, "/v1beta/models/gemini-2.5-flash:generateContent");
     assert!(body.contains("inlineData"));
     assert!(body.contains("application/json"));
+    assert!(body.contains("\"thinkingBudget\":0"));
+    assert!(!body.contains("thinkingLevel"));
     let debug = format!("{extractor:?} {attempt:?}");
     assert!(!debug.contains("sk-test-secret"));
 }

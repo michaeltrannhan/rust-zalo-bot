@@ -185,6 +185,13 @@ async fn ingress_reply_enqueues_outbound_and_job_atomically() {
             .await
             .expect("account id");
     assert_eq!(serialization_key, format!("account:{account_id}"));
+
+    let priority: i32 = sqlx::query_scalar("SELECT priority FROM jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("priority");
+    assert_eq!(priority, 10);
 }
 
 #[tokio::test]

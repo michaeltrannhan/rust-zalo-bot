@@ -5,8 +5,10 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::conversation::{
-    format_date_vn, format_minor, manual_confirmation_card, transaction_type_label,
+    extraction_failed_text, extraction_unsupported_text, format_date_vn, format_minor,
+    manual_confirmation_card, transaction_type_label,
 };
+use crate::error::ErrorClass;
 use crate::receipt::ReceiptLifecycle;
 
 use super::policy::IngressPolicy;
@@ -61,8 +63,78 @@ pub async fn enqueue_receipt_review_followup(
     Ok(())
 }
 
+/// Tell the user when ingest/extract fails permanently so the bot does not stay silent after ack.
+pub async fn enqueue_receipt_failure_followup(
+    pool: &PgPool,
+    policy: &IngressPolicy,
+    account_id: Uuid,
+    submission_id: Uuid,
+    class: ErrorClass,
+) -> Result<(), FollowupError> {
+    let idempotency_key = failure_idempotency_key(submission_id);
+    let existing: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM outbound_messages WHERE idempotency_key = $1")
+            .bind(&idempotency_key)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| FollowupError::dependency("outbound lookup failed"))?;
+    if existing.is_some() {
+        return Ok(());
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| FollowupError::dependency("begin transaction failed"))?;
+
+    let routing: (Option<Uuid>, String, String) = sqlx::query_as(
+        r#"
+        SELECT rs.inbound_event_id, ie.provider_scope, ie.provider_chat_id
+        FROM receipt_submissions rs
+        JOIN inbound_events ie ON ie.id = rs.inbound_event_id
+        WHERE rs.id = $1 AND rs.account_id = $2
+        "#,
+    )
+    .bind(submission_id)
+    .bind(account_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| FollowupError::dependency("submission routing lookup failed"))?
+    .ok_or_else(|| FollowupError::not_found("submission routing not found"))?;
+
+    let (inbound_event_id, provider_scope, provider_chat_id) = routing;
+    let body = match class {
+        ErrorClass::Unsupported => extraction_unsupported_text(),
+        ErrorClass::KillSwitch => crate::conversation::extraction_kill_switch_text(),
+        _ => extraction_failed_text(),
+    };
+
+    enqueue_outbound_in_transaction(
+        &mut tx,
+        policy,
+        Utc::now(),
+        Some(account_id),
+        inbound_event_id,
+        &provider_scope,
+        &provider_chat_id,
+        &body,
+        &idempotency_key,
+    )
+    .await
+    .map_err(|_| FollowupError::dependency("outbound enqueue failed"))?;
+
+    tx.commit()
+        .await
+        .map_err(|_| FollowupError::dependency("commit failed"))?;
+    Ok(())
+}
+
 fn review_idempotency_key(submission_id: Uuid) -> String {
     format!("receipt-review:{submission_id}")
+}
+
+fn failure_idempotency_key(submission_id: Uuid) -> String {
+    format!("receipt-failure:{submission_id}")
 }
 
 fn review_card_body(context: &FollowupContext) -> String {

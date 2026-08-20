@@ -33,7 +33,7 @@ use crate::provider::{ZaloHttpAdapter, ZaloHttpConfig};
 use crate::receipt::{ReceiptConfig, ReceiptLifecycle, build_extractor, build_object_store};
 use crate::work::{ClaimOptions, ClaimedJob, WorkStore};
 
-const CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const SHUTDOWN_DRAIN_DEADLINE: Duration = Duration::from_secs(30);
 
 type RoleResult = Result<(), AppError>;

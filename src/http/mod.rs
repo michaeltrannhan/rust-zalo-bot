@@ -61,7 +61,9 @@ pub fn router(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/health/live", get(live_handler))
         .route("/health/ready", get(ready_handler))
-        .route("/webhooks/zalo", post(zalo_webhook_handler));
+        // `/webhook/zalo` is the legacy Go path still registered with Zalo.
+        .route("/webhooks/zalo", post(zalo_webhook_handler))
+        .route("/webhook/zalo", post(zalo_webhook_handler));
 
     if metrics_enabled {
         router = router.route("/metrics", get(metrics_handler));

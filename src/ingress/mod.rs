@@ -11,7 +11,7 @@ pub use application::{
     process_image, process_text_command, store_with_receipt, store_with_receipt_and_policy,
 };
 pub use effects::{IngressEffect, IngressEffectError};
-pub use followup::enqueue_receipt_review_followup;
+pub use followup::{enqueue_receipt_failure_followup, enqueue_receipt_review_followup};
 pub use policy::IngressPolicy;
 pub use store::{IngressError, IngressStore, enqueue_outbound_in_transaction};
 pub use types::{

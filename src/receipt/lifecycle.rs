@@ -21,8 +21,8 @@ use super::types::{
     AcceptSubmissionOutcome, AcceptSubmissionRequest, ConfirmOutcome, ConfirmRequest,
     EditDraftRequest, ExpenseDraftView, ExtractOutcome, IngestOutcome, JOB_TYPE_EXTRACT,
     JOB_TYPE_INGEST, ReceiptConfig, ReceiptJobPayload, ReceiptState, ReceiptStateView,
-    RejectRequest, ValidatedImage, account_serialization_key, can_transition, extract_dedupe_key,
-    ingest_dedupe_key,
+    RejectRequest, ValidatedImage, can_transition, extract_dedupe_key, ingest_dedupe_key,
+    receipt_serialization_key,
 };
 use super::validate::{
     object_key, validate_amount_minor, validate_currency, validate_image, validate_merchant,
@@ -1841,7 +1841,9 @@ async fn enqueue_receipt_job(
         job_type: job_type.to_string(),
         payload,
         dedupe_key,
-        serialization_key: Some(account_serialization_key(account_id)),
+        // Keep receipt pipeline ordered per account, but do not share the chat
+        // outbound serialization key — otherwise long Gemini extracts stall /help.
+        serialization_key: Some(receipt_serialization_key(account_id)),
         priority: 0,
         run_at: Utc::now(),
         max_attempts: 10,

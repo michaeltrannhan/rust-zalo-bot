@@ -1,2 +1,5 @@
 # Default inactive-safe upstream. host-slot-deploy.sh replaces this file.
+# Accept legacy Go path (/webhook/zalo) and current Rust path (/webhooks/zalo).
+@legacyWebhook path /webhook/zalo
+rewrite @legacyWebhook /webhooks/zalo
 reverse_proxy 127.0.0.1:8081

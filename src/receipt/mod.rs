@@ -27,6 +27,7 @@ pub use types::{
     ExtractionResult, IngestOutcome, JOB_TYPE_EXTRACT, JOB_TYPE_INGEST, ReceiptConfig,
     ReceiptJobPayload, ReceiptState, ReceiptStateView, RejectRequest, ValidatedImage,
     account_serialization_key, can_transition, extract_dedupe_key, ingest_dedupe_key,
+    receipt_serialization_key,
 };
 pub use validate::{MAX_IMAGE_BYTES, MAX_PIXEL_COUNT, object_key, validate_image};
 

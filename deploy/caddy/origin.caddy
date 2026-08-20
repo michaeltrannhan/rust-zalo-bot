@@ -1,8 +1,11 @@
 # Loopback origin for Cloudflare Tunnel (or any local reverse proxy).
 # Public TLS stays on the tunnel; this site never binds a public address.
 # Upstream file is rewritten atomically by host-slot-deploy.sh.
+#
+# Bind :8080 for all Host headers. Cloudflare Tunnel sends the public
+# hostname (e.g. bot.example.com); matching only 127.0.0.1 drops those.
 
-http://127.0.0.1:8080 {
+:8080 {
 	import /etc/zl-expense/caddy/upstream.caddy
 	log {
 		output discard

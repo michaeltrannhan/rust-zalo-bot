@@ -476,7 +476,7 @@ async fn ingest_and_extract_enqueue_versioned_jobs() {
     assert_eq!(ingest_summary.payload_version, 1);
     assert_eq!(
         ingest_summary.serialization_key.as_deref(),
-        Some(format!("account:{account_id}").as_str())
+        Some(format!("receipt:{account_id}").as_str())
     );
 
     let extract_job_id = Uuid::new_v4();
@@ -496,6 +496,10 @@ async fn ingest_and_extract_enqueue_versioned_jobs() {
         .expect("extract job");
     assert_eq!(extract_summary.job_type, "receipt.extract");
     assert_eq!(extract_summary.payload_version, 1);
+    assert_eq!(
+        extract_summary.serialization_key.as_deref(),
+        Some(format!("receipt:{account_id}").as_str())
+    );
     assert_eq!(extract_summary.state, zl_expense::work::JobState::Queued);
 }
 

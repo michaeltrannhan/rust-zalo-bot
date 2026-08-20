@@ -15,11 +15,17 @@ use super::error::ReceiptError;
 use super::types::{ExtractedAttempt, ExtractionMeta, ExtractionResult};
 use super::validate::{validate_amount_minor, validate_currency, validate_merchant};
 
-pub const EXTRACTION_PROMPT_VERSION: &str = "extraction-json-v1";
+pub const EXTRACTION_PROMPT_VERSION: &str = "extraction-json-v2";
 
-const EXTRACTION_PROMPT: &str = "Extract one Vietnamese receipt into JSON matching the schema. \
-Use category_key from the allowed enum. occurred_at is RFC3339 UTC. \
-amount_minor is integer minor units. Set unsupported=true if this is not a receipt.";
+const EXTRACTION_PROMPT: &str = "Extract one Vietnamese receipt or invoice into JSON matching the schema. \
+Read the merchant/store carefully from the header (company or shop name), not product line items. \
+amount_minor is the FINAL amount the customer pays in VND đồng as an integer \
+(example: 118.000đ → 118000). Prefer totals labeled Tổng cộng, Thành tiền, Tổng thanh toán, \
+or similar over unit prices or subtotals. \
+occurred_at is the receipt date/time as RFC3339 UTC; if only a calendar date is printed, \
+use that date at 00:00:00Z. \
+Choose the best category_key from the allowed enum. \
+Set unsupported=true only when the image is clearly not a receipt/invoice.";
 
 const CATEGORY_KEYS: &[&str] = &[
     "an-uong",
@@ -156,8 +162,8 @@ impl GeminiHttpExtractor {
             "responseSchema": response_schema(),
             "maxOutputTokens": self.max_output_tokens,
         });
-        if let Some(budget) = thinking_budget(&self.thinking_effort) {
-            generation_config["thinkingConfig"] = json!({ "thinkingBudget": budget });
+        if let Some(thinking) = thinking_config(&self.model, &self.thinking_effort) {
+            generation_config["thinkingConfig"] = thinking;
         }
         json!({
             "contents": [{
@@ -214,11 +220,27 @@ impl fmt::Debug for GeminiExtractorConfig {
     }
 }
 
+fn thinking_config(model: &str, effort: &str) -> Option<Value> {
+    let model = model.to_ascii_lowercase();
+    if model.starts_with("gemini-3") {
+        // Gemini 3 uses thinkingLevel; budget is ignored / rejected.
+        let level = match effort {
+            "none" | "low" => "LOW",
+            "medium" | "high" => "HIGH",
+            _ => return None,
+        };
+        return Some(json!({ "thinkingLevel": level }));
+    }
+    thinking_budget(effort).map(|budget| json!({ "thinkingBudget": budget }))
+}
+
 fn thinking_budget(effort: &str) -> Option<u32> {
     match effort {
-        "low" => Some(1024),
-        "medium" => Some(4096),
-        "high" => Some(8192),
+        // Explicit 0 disables dynamic thinking on flash models (default is on).
+        "none" => Some(0),
+        "low" => Some(2048),
+        "medium" => Some(8192),
+        "high" => Some(16384),
         _ => None,
     }
 }
@@ -281,9 +303,7 @@ fn parse_generate_content(
     {
         return Err(ReceiptError::validation("gemini did not finish normally"));
     }
-    let text = parsed
-        .pointer("/candidates/0/content/parts/0/text")
-        .and_then(Value::as_str)
+    let text = extract_candidate_text(&parsed)
         .ok_or_else(|| ReceiptError::validation("gemini response missing candidates"))?;
     if let Some(input) = parsed
         .pointer("/usageMetadata/promptTokenCount")
@@ -299,6 +319,20 @@ fn parse_generate_content(
     }
     let result = parse_extraction_json(text)?;
     Ok(ExtractedAttempt { result, meta })
+}
+
+fn extract_candidate_text(parsed: &Value) -> Option<&str> {
+    let parts = parsed.pointer("/candidates/0/content/parts")?.as_array()?;
+    // Prefer the last non-thought text part so thinking models still yield JSON.
+    parts.iter().rev().find_map(|part| {
+        if part.get("thought").and_then(Value::as_bool) == Some(true) {
+            return None;
+        }
+        part.get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    })
 }
 
 fn parse_extraction_json(text: &str) -> Result<ExtractionResult, ReceiptError> {
@@ -400,5 +434,43 @@ mod tests {
         let error = parse_generate_content("{}", ExtractionMeta::fake()).unwrap_err();
         assert_eq!(error.class, crate::error::ErrorClass::Validation);
         assert!(!error.message.contains("sk-test-secret"));
+    }
+
+    #[test]
+    fn skips_thought_parts_when_reading_json() {
+        let body = serde_json::json!({
+            "candidates": [{
+                "finishReason": "STOP",
+                "content": {
+                    "parts": [
+                        { "thought": true, "text": "reasoning..." },
+                        { "text": serde_json::json!({
+                            "merchant": "Co.opmart",
+                            "amount_minor": 325000,
+                            "currency": "VND",
+                            "category_key": "thuc-pham",
+                            "transaction_type": "expense",
+                            "occurred_at": "2026-07-15T09:24:00Z",
+                            "confidence": 0.95,
+                            "unsupported": false
+                        }).to_string() }
+                    ]
+                }
+            }]
+        })
+        .to_string();
+        let attempt = parse_generate_content(&body, ExtractionMeta::fake()).expect("parse");
+        assert_eq!(attempt.result.merchant, "Co.opmart");
+    }
+
+    #[test]
+    fn gemini3_uses_thinking_level() {
+        let config = thinking_config("gemini-3.6-flash", "high").expect("config");
+        assert_eq!(config["thinkingLevel"], "HIGH");
+        assert!(config.get("thinkingBudget").is_none());
+        let low = thinking_config("gemini-3.5-flash", "low").expect("low");
+        assert_eq!(low["thinkingLevel"], "LOW");
+        let flash25 = thinking_config("gemini-2.5-flash", "medium").expect("budget");
+        assert_eq!(flash25["thinkingBudget"], 8192);
     }
 }

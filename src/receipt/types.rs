@@ -149,6 +149,11 @@ pub fn account_serialization_key(account_id: Uuid) -> String {
     format!("account:{account_id}")
 }
 
+/// Serialize receipt ingest/extract per account without blocking chat outbound.
+pub fn receipt_serialization_key(account_id: Uuid) -> String {
+    format!("receipt:{account_id}")
+}
+
 /// Request to accept a new receipt submission.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AcceptSubmissionRequest {

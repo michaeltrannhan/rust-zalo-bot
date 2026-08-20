@@ -13,7 +13,8 @@ use crate::account::{
 use crate::conversation::{empty_summary_text, today_summary_text};
 use crate::error::ErrorClass;
 use crate::ingress::{
-    IngressPolicy, enqueue_outbound_in_transaction, enqueue_receipt_review_followup,
+    IngressPolicy, enqueue_outbound_in_transaction, enqueue_receipt_failure_followup,
+    enqueue_receipt_review_followup,
 };
 use crate::insight::{
     FakeNarrator, INSIGHT_NARRATE_PAYLOAD_VERSION, InsightNarratePayload, InsightNarrator,
@@ -131,6 +132,14 @@ async fn dispatch_receipt_ingest<R: MediaHostResolver>(
                     .receipt
                     .fail_queued(submission_id, account_id, error.class)
                     .await;
+                let _ = enqueue_receipt_failure_followup(
+                    &deps.pool,
+                    &deps.ingress_policy,
+                    account_id,
+                    submission_id,
+                    error.class,
+                )
+                .await;
             }
             return OutboundJobExecution::Fail(error.class);
         }
@@ -159,11 +168,19 @@ async fn dispatch_receipt_ingest<R: MediaHostResolver>(
             | IngestOutcome::AlreadyTerminal { .. },
         ) => receipt_job_complete(),
         Err(error) => {
-            if error.class == ErrorClass::Validation {
+            if error.class == ErrorClass::Validation || error.class == ErrorClass::Unsupported {
                 let _ = deps
                     .receipt
                     .fail_queued(submission_id, account_id, error.class)
                     .await;
+                let _ = enqueue_receipt_failure_followup(
+                    &deps.pool,
+                    &deps.ingress_policy,
+                    account_id,
+                    submission_id,
+                    error.class,
+                )
+                .await;
             }
             OutboundJobExecution::Fail(error.class)
         }
@@ -205,8 +222,37 @@ async fn dispatch_receipt_extract<R: MediaHostResolver>(
             receipt_job_complete()
         }
         Ok(ExtractOutcome::AlreadyTerminal { .. }) => receipt_job_complete(),
-        Ok(ExtractOutcome::Unsupported) => OutboundJobExecution::Fail(ErrorClass::Unsupported),
-        Err(error) => OutboundJobExecution::Fail(error.class),
+        Ok(ExtractOutcome::Unsupported) => {
+            let _ = enqueue_receipt_failure_followup(
+                &deps.pool,
+                &deps.ingress_policy,
+                account_id,
+                submission_id,
+                ErrorClass::Unsupported,
+            )
+            .await;
+            OutboundJobExecution::Fail(ErrorClass::Unsupported)
+        }
+        Err(error) => {
+            if matches!(
+                error.class,
+                ErrorClass::Validation
+                    | ErrorClass::Unsupported
+                    | ErrorClass::KillSwitch
+                    | ErrorClass::QuotaExceeded
+                    | ErrorClass::Auth
+            ) {
+                let _ = enqueue_receipt_failure_followup(
+                    &deps.pool,
+                    &deps.ingress_policy,
+                    account_id,
+                    submission_id,
+                    error.class,
+                )
+                .await;
+            }
+            OutboundJobExecution::Fail(error.class)
+        }
     }
 }
 

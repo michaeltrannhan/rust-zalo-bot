@@ -379,6 +379,52 @@ async fn serialization_key_allows_one_active_job_with_concurrent_claimers() {
 }
 
 #[tokio::test]
+async fn distinct_serialization_keys_claim_in_parallel() {
+    let _guard = common::integration_lock();
+    let Some(_) = common::skip_without_database("distinct_serialization_keys_claim_in_parallel")
+    else {
+        return;
+    };
+
+    let pool = fresh_pool().await;
+    let store = WorkStore::new(pool);
+
+    // Mimic receipt OCR vs chat outbound: same account, different keys.
+    store
+        .enqueue(enqueue_request(
+            "receipt.extract",
+            Some("receipt:acct-1"),
+            0,
+            0,
+        ))
+        .await
+        .expect("enqueue extract");
+    store
+        .enqueue(enqueue_request(
+            "outbound.deliver",
+            Some("account:acct-1"),
+            10,
+            0,
+        ))
+        .await
+        .expect("enqueue outbound");
+
+    let first = store
+        .claim(claim_options(1, "worker-a"))
+        .await
+        .expect("claim first");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].dedupe_key, "outbound.deliver");
+
+    let second = store
+        .claim(claim_options(1, "worker-b"))
+        .await
+        .expect("claim second while first leased");
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].dedupe_key, "receipt.extract");
+}
+
+#[tokio::test]
 async fn heartbeat_only_accepts_current_lease_token() {
     let _guard = common::integration_lock();
     let Some(_) = common::skip_without_database("heartbeat_only_accepts_current_lease_token")

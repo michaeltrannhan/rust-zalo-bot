@@ -51,7 +51,11 @@ pub async fn enqueue_delete_in_transaction(
     now: DateTime<Utc>,
 ) -> Result<(), ErrorClass> {
     let serialization_key = crate::receipt::account_serialization_key(account_id);
+    let receipt_key = crate::receipt::receipt_serialization_key(account_id);
     WorkStore::cancel_queued_by_serialization_key_in_transaction(tx, &serialization_key)
+        .await
+        .map_err(|_| ErrorClass::Dependency)?;
+    WorkStore::cancel_queued_by_serialization_key_in_transaction(tx, &receipt_key)
         .await
         .map_err(|_| ErrorClass::Dependency)?;
     let payload = AccountDeletePayload {
