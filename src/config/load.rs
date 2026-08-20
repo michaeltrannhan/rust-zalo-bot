@@ -1308,9 +1308,7 @@ fn validate_thinking_effort(model: &str, effort: &str) -> Result<(), AppError> {
 
 fn model_supports_thinking(model: &str) -> bool {
     let model = model.to_ascii_lowercase();
-    model.starts_with("gemini-2.5")
-        || model.starts_with("gemini-3")
-        || model.contains("thinking")
+    model.starts_with("gemini-2.5") || model.starts_with("gemini-3") || model.contains("thinking")
 }
 
 fn resolve_ai_profiles(cfg: &Config) -> Result<Vec<ResolvedAiProfile>, AppError> {

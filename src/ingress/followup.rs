@@ -5,8 +5,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::conversation::{
-    extraction_failed_text, extraction_unsupported_text, format_date_vn, format_minor,
-    manual_confirmation_card, transaction_type_label,
+    Locale, extraction_failed_text, extraction_kill_switch_text, extraction_unsupported_text,
+    format_date_vn, format_minor, manual_confirmation_card, transaction_type_label,
 };
 use crate::error::ErrorClass;
 use crate::receipt::ReceiptLifecycle;
@@ -87,11 +87,12 @@ pub async fn enqueue_receipt_failure_followup(
         .await
         .map_err(|_| FollowupError::dependency("begin transaction failed"))?;
 
-    let routing: (Option<Uuid>, String, String) = sqlx::query_as(
+    let routing: (Option<Uuid>, String, String, String) = sqlx::query_as(
         r#"
-        SELECT rs.inbound_event_id, ie.provider_scope, ie.provider_chat_id
+        SELECT rs.inbound_event_id, ie.provider_scope, ie.provider_chat_id, a.locale
         FROM receipt_submissions rs
         JOIN inbound_events ie ON ie.id = rs.inbound_event_id
+        JOIN accounts a ON a.id = rs.account_id
         WHERE rs.id = $1 AND rs.account_id = $2
         "#,
     )
@@ -102,11 +103,12 @@ pub async fn enqueue_receipt_failure_followup(
     .map_err(|_| FollowupError::dependency("submission routing lookup failed"))?
     .ok_or_else(|| FollowupError::not_found("submission routing not found"))?;
 
-    let (inbound_event_id, provider_scope, provider_chat_id) = routing;
+    let (inbound_event_id, provider_scope, provider_chat_id, locale_raw) = routing;
+    let locale = Locale::parse(&locale_raw);
     let body = match class {
-        ErrorClass::Unsupported => extraction_unsupported_text(),
-        ErrorClass::KillSwitch => crate::conversation::extraction_kill_switch_text(),
-        _ => extraction_failed_text(),
+        ErrorClass::Unsupported => extraction_unsupported_text(locale),
+        ErrorClass::KillSwitch => extraction_kill_switch_text(locale),
+        _ => extraction_failed_text(locale),
     };
 
     enqueue_outbound_in_transaction(
@@ -138,11 +140,13 @@ fn failure_idempotency_key(submission_id: Uuid) -> String {
 }
 
 fn review_card_body(context: &FollowupContext) -> String {
+    let locale = Locale::parse(&context.locale);
     manual_confirmation_card(
+        locale,
         &context.merchant,
         &format_minor(context.amount_minor, &context.currency),
         &format_date_vn(context.occurred_at, &context.timezone),
-        transaction_type_label(&context.transaction_type),
+        transaction_type_label(locale, &context.transaction_type),
         &context.category_display,
     )
 }
@@ -152,6 +156,7 @@ struct FollowupContext {
     provider_scope: String,
     provider_chat_id: String,
     timezone: String,
+    locale: String,
     amount_minor: i64,
     currency: String,
     merchant: String,
@@ -165,9 +170,9 @@ async fn load_followup_context(
     account_id: Uuid,
     submission_id: Uuid,
 ) -> Result<FollowupContext, FollowupError> {
-    let routing: (Option<Uuid>, String, String, String) = sqlx::query_as(
+    let routing: (Option<Uuid>, String, String, String, String) = sqlx::query_as(
         r#"
-        SELECT rs.inbound_event_id, ie.provider_scope, ie.provider_chat_id, a.timezone
+        SELECT rs.inbound_event_id, ie.provider_scope, ie.provider_chat_id, a.timezone, a.locale
         FROM receipt_submissions rs
         JOIN inbound_events ie ON ie.id = rs.inbound_event_id
         JOIN accounts a ON a.id = rs.account_id
@@ -181,7 +186,8 @@ async fn load_followup_context(
     .map_err(|_| FollowupError::dependency("submission routing lookup failed"))?
     .ok_or_else(|| FollowupError::not_found("submission routing not found"))?;
 
-    let (inbound_event_id, provider_scope, provider_chat_id, timezone) = routing;
+    let (inbound_event_id, provider_scope, provider_chat_id, timezone, locale) = routing;
+    let use_en = locale.to_ascii_lowercase().starts_with("en");
 
     let (amount_minor, currency, merchant, category_display, transaction_type, occurred_at): (
         i64,
@@ -192,7 +198,9 @@ async fn load_followup_context(
         DateTime<Utc>,
     ) = sqlx::query_as(
         r#"
-        SELECT d.amount_minor, d.currency, d.merchant, c.display_name_vi, d.transaction_type, d.occurred_at
+        SELECT d.amount_minor, d.currency, d.merchant,
+               CASE WHEN $3 THEN c.display_name_en ELSE c.display_name_vi END,
+               d.transaction_type, d.occurred_at
         FROM expense_drafts d
         JOIN categories c ON c.key = d.category_key
         WHERE d.submission_id = $1 AND d.account_id = $2
@@ -200,6 +208,7 @@ async fn load_followup_context(
     )
     .bind(submission_id)
     .bind(account_id)
+    .bind(use_en)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|_| FollowupError::dependency("draft lookup failed"))?
@@ -210,6 +219,7 @@ async fn load_followup_context(
         provider_scope,
         provider_chat_id,
         timezone,
+        locale,
         amount_minor,
         currency,
         merchant,

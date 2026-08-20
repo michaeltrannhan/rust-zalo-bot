@@ -3,8 +3,9 @@
 use uuid::Uuid;
 
 use crate::conversation::{
-    self, AccountContext, DomainCommand, LifecycleState as ConversationLifecycle, ManualDraftView,
-    PendingConfirmation, PendingKind, PeriodSummary, RecentExpenseLine, ScheduleLine,
+    self, AccountContext, DomainCommand, LifecycleState as ConversationLifecycle, Locale,
+    ManualDraftView, PendingConfirmation, PendingKind, PeriodSummary, RecentExpenseLine,
+    ScheduleLine, category_display, period_label_month, period_label_today, period_label_week,
     transaction_type_label,
 };
 use crate::receipt::ReceiptLifecycle;
@@ -67,34 +68,38 @@ pub fn store_with_receipt_and_policy(
 }
 
 fn decide_text_and_map(context: DecisionContext) -> Result<DecisionOutput, IngressEffectError> {
-    let pending_state_version = context
-        .pending_action
-        .as_ref()
-        .map(|pending| pending.version);
     let account = to_conversation_context(&context)?;
     let outcome = conversation::decide(&account, &context.user_text, context.now);
-    map_outcome(outcome, &context, pending_state_version)
+    map_outcome(outcome, &context)
 }
 
 fn decide_image_and_map(context: DecisionContext) -> Result<DecisionOutput, IngressEffectError> {
     let account = to_conversation_context(&context)?;
     let outcome = conversation::decide_image(&account, context.now);
-    map_outcome(outcome, &context, None)
+    map_outcome(outcome, &context)
 }
 
 fn map_outcome(
     outcome: conversation::ConversationOutcome,
     context: &DecisionContext,
-    pending_state_version: Option<i32>,
 ) -> Result<DecisionOutput, IngressEffectError> {
     let inbound_event_id = context
         .inbound_event_id
         .ok_or(IngressEffectError::InvalidTransition)?;
-    let effects = outcome
-        .commands
-        .into_iter()
-        .map(|command| map_command(command, pending_state_version, inbound_event_id))
-        .collect::<Result<Vec<_>, _>>()?;
+    let pending_state_version = context
+        .pending_action
+        .as_ref()
+        .map(|pending| pending.version);
+
+    let mut effects = Vec::with_capacity(outcome.commands.len());
+    for command in outcome.commands {
+        effects.push(map_command(
+            command,
+            pending_state_version,
+            inbound_event_id,
+        )?);
+    }
+
     let reply = match outcome.replies.as_slice() {
         [] => None,
         [reply] => Some(ReplyIntent {
@@ -109,6 +114,7 @@ fn map_outcome(
 fn to_conversation_context(
     context: &DecisionContext,
 ) -> Result<AccountContext, IngressEffectError> {
+    let locale = Locale::parse(context.locale.as_str());
     let lifecycle = match context.lifecycle_state {
         Some(LifecycleState::Active) => ConversationLifecycle::Active,
         Some(LifecycleState::Suspended | LifecycleState::Deleting | LifecycleState::Deleted) => {
@@ -128,9 +134,12 @@ fn to_conversation_context(
                 amount_minor: 0,
                 currency: context.default_currency.clone(),
                 merchant: String::new(),
+                category_key: "khac".to_string(),
                 category_display: String::new(),
+                transaction_type: "expense".to_string(),
                 type_label: String::new(),
                 date_display: String::new(),
+                occurred_at: context.now,
             },
         }),
         Some(pending) => pending
@@ -145,8 +154,11 @@ fn to_conversation_context(
                     expense.currency.clone(),
                     expense.description.clone(),
                     conversation::format_date_vn(expense.occurred_at, &context.timezone),
-                    "Khác".to_string(),
-                    "Chi tiêu".to_string(),
+                    expense.category_key.clone(),
+                    category_display(locale, &expense.category_key),
+                    expense.transaction_type.clone(),
+                    transaction_type_label(locale, &expense.transaction_type).to_string(),
+                    expense.occurred_at,
                 )
             })
             .or_else(|| {
@@ -159,8 +171,11 @@ fn to_conversation_context(
                         draft.currency.clone(),
                         draft.merchant.clone(),
                         conversation::format_date_vn(draft.occurred_at, &context.timezone),
+                        draft.category_key.clone(),
                         draft.category_display.clone(),
-                        transaction_type_label(&draft.transaction_type).to_string(),
+                        draft.transaction_type.clone(),
+                        transaction_type_label(locale, &draft.transaction_type).to_string(),
+                        draft.occurred_at,
                     )
                 })
             })
@@ -173,8 +188,11 @@ fn to_conversation_context(
                     currency,
                     merchant,
                     date_display,
+                    category_key,
                     category_display,
+                    transaction_type,
                     type_label,
+                    occurred_at,
                 )| PendingConfirmation {
                     kind,
                     reference_id,
@@ -185,9 +203,12 @@ fn to_conversation_context(
                         amount_minor,
                         currency,
                         merchant,
+                        category_key,
                         category_display,
+                        transaction_type,
                         type_label,
                         date_display,
+                        occurred_at,
                     },
                 },
             ),
@@ -203,8 +224,8 @@ fn to_conversation_context(
             amount_minor: expense.amount_minor,
             currency: expense.currency.clone(),
             merchant: expense.description.clone(),
-            category_display: "Khác".to_string(),
-            type_label: None,
+            category_display: category_display(locale, &expense.category_key),
+            type_label: Some(transaction_type_label(locale, &expense.transaction_type).to_string()),
         })
         .collect();
 
@@ -216,24 +237,25 @@ fn to_conversation_context(
         allowlisted: context.sender_allowed,
         default_currency: context.default_currency.clone(),
         timezone: context.timezone.clone(),
+        locale: context.locale.clone(),
         original_receipt_retention_days: context.original_receipt_retention_days,
         remaining_daily_receipts: context.remaining_daily_receipts,
         confirmed_expense_count: context.confirmed_expense_count,
         pending,
         today_summary: Some(PeriodSummary {
-            label: "Hôm nay".to_string(),
+            label: period_label_today(locale).to_string(),
             currency: context.today_currency.clone(),
             total_minor: context.confirmed_today_total_minor,
             tx_count: context.confirmed_today_count,
         }),
         week_summary: Some(PeriodSummary {
-            label: "Tuần này".to_string(),
+            label: period_label_week(locale).to_string(),
             currency: context.week_currency.clone(),
             total_minor: context.week_total_minor,
             tx_count: context.week_tx_count,
         }),
         month_summary: Some(PeriodSummary {
-            label: "Tháng này".to_string(),
+            label: period_label_month(locale).to_string(),
             currency: context.month_currency.clone(),
             total_minor: context.month_total_minor,
             tx_count: context.month_tx_count,
@@ -322,19 +344,49 @@ fn map_command(
             expected_draft_version: i32::try_from(expected_draft_version)
                 .map_err(|_| IngressEffectError::InvalidTransition)?,
         }),
-        DomainCommand::EditReceiptAmount {
+        DomainCommand::EditReceiptDraft {
             submission_id,
             expected_draft_version,
             amount_minor,
+            merchant,
+            category_key,
+            occurred_at,
+            transaction_type,
         } => Ok(IngressEffect::EditReceiptDraft {
             submission_id,
             expected_draft_version: i32::try_from(expected_draft_version)
                 .map_err(|_| IngressEffectError::InvalidTransition)?,
             amount_minor,
+            merchant,
+            category_key,
+            occurred_at,
+            transaction_type,
         }),
+        DomainCommand::EditManualExpense {
+            expense_id,
+            expected_version,
+            amount_minor,
+            merchant,
+            category_key,
+            occurred_at,
+            transaction_type,
+        } => Ok(IngressEffect::EditManualExpense {
+            expense_id,
+            expected_version: i32::try_from(expected_version)
+                .map_err(|_| IngressEffectError::InvalidTransition)?,
+            amount_minor,
+            merchant,
+            category_key,
+            occurred_at,
+            transaction_type,
+        }),
+        DomainCommand::RecategorizeLatest { category_key } => {
+            Ok(IngressEffect::RecategorizeLatest { category_key })
+        }
         DomainCommand::ClearPending => Ok(IngressEffect::ClearPendingAction {
             expected_version: pending_state_version.ok_or(IngressEffectError::NotFound)?,
         }),
+        DomainCommand::SetLocale { locale } => Ok(IngressEffect::SetLocale { locale }),
         DomainCommand::SetTimezone { iana } => Ok(IngressEffect::SetTimezone { iana }),
         DomainCommand::UpsertSchedule {
             frequency,

@@ -16,6 +16,8 @@ pub struct AccountContext {
     pub allowlisted: bool,
     pub default_currency: String,
     pub timezone: String,
+    /// Reply language (`vi-VN` / `en-US`).
+    pub locale: String,
     pub original_receipt_retention_days: u32,
     /// Remaining daily receipt submissions before quota is exceeded.
     pub remaining_daily_receipts: i64,
@@ -65,9 +67,12 @@ pub struct ManualDraftView {
     pub amount_minor: i64,
     pub currency: String,
     pub merchant: String,
+    pub category_key: String,
     pub category_display: String,
+    pub transaction_type: String,
     pub type_label: String,
     pub date_display: String,
+    pub occurred_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,12 +147,31 @@ pub enum DomainCommand {
         submission_id: Uuid,
         expected_draft_version: u64,
     },
-    EditReceiptAmount {
+    EditReceiptDraft {
         submission_id: Uuid,
         expected_draft_version: u64,
-        amount_minor: i64,
+        amount_minor: Option<i64>,
+        merchant: Option<String>,
+        category_key: Option<String>,
+        occurred_at: Option<DateTime<Utc>>,
+        transaction_type: Option<String>,
+    },
+    EditManualExpense {
+        expense_id: Uuid,
+        expected_version: u64,
+        amount_minor: Option<i64>,
+        merchant: Option<String>,
+        category_key: Option<String>,
+        occurred_at: Option<DateTime<Utc>>,
+        transaction_type: Option<String>,
+    },
+    RecategorizeLatest {
+        category_key: String,
     },
     ClearPending,
+    SetLocale {
+        locale: String,
+    },
     SetTimezone {
         iana: String,
     },

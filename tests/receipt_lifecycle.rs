@@ -299,6 +299,7 @@ async fn edit_draft_records_corrections_and_rejects_version_conflict() {
             merchant: Some("Edited Merchant".to_string()),
             category_key: Some("khac".to_string()),
             occurred_at: None,
+            transaction_type: None,
         })
         .await
         .expect("edit");
@@ -323,6 +324,7 @@ async fn edit_draft_records_corrections_and_rejects_version_conflict() {
             merchant: Some("Edited Merchant".to_string()),
             category_key: Some("khac".to_string()),
             occurred_at: None,
+            transaction_type: None,
         })
         .await
         .expect("unchanged edit");
@@ -345,6 +347,7 @@ async fn edit_draft_records_corrections_and_rejects_version_conflict() {
             merchant: None,
             category_key: None,
             occurred_at: None,
+            transaction_type: None,
         })
         .await
         .expect_err("invalid amount");
@@ -360,6 +363,7 @@ async fn edit_draft_records_corrections_and_rejects_version_conflict() {
             merchant: None,
             category_key: None,
             occurred_at: None,
+            transaction_type: None,
         })
         .await
         .expect_err("stale version");

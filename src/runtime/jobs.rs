@@ -334,19 +334,23 @@ async fn dispatch_schedule_emit<R: MediaHostResolver>(
         return OutboundJobExecution::InvalidJob;
     }
 
-    let lifecycle: Option<String> =
-        sqlx::query_scalar("SELECT lifecycle_state FROM accounts WHERE id = $1")
+    let lifecycle: Option<(String, String)> =
+        sqlx::query_as("SELECT lifecycle_state, locale FROM accounts WHERE id = $1")
             .bind(payload.account_id)
             .fetch_optional(&deps.pool)
             .await
             .ok()
             .flatten();
+    let Some((lifecycle_state, locale_raw)) = lifecycle else {
+        return receipt_job_complete();
+    };
     if matches!(
-        lifecycle.as_deref(),
-        Some("suspended") | Some("deleting") | Some("deleted") | None
+        lifecycle_state.as_str(),
+        "suspended" | "deleting" | "deleted"
     ) {
         return receipt_job_complete();
     }
+    let locale = crate::conversation::Locale::parse(&locale_raw);
 
     let schedule_row: Option<(String, String, String)> = sqlx::query_as(
         r#"
@@ -391,9 +395,9 @@ async fn dispatch_schedule_emit<R: MediaHostResolver>(
 
     let label = scheduled_period_label(&payload.frequency);
     let body = if tx_count == 0 {
-        empty_summary_text(label)
+        empty_summary_text(locale, label)
     } else {
-        today_summary_text(label, &currency, total_minor)
+        today_summary_text(locale, label, &currency, total_minor)
     };
 
     let idempotency_key = format!(

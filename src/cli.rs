@@ -26,7 +26,12 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 
     /// Log format: pretty (default) or json.
-    #[arg(long, global = true, env = "ZL_EXPENSE_LOG_FORMAT", default_value = "pretty")]
+    #[arg(
+        long,
+        global = true,
+        env = "ZL_EXPENSE_LOG_FORMAT",
+        default_value = "pretty"
+    )]
     pub log_format: LogFormat,
 
     #[command(subcommand)]

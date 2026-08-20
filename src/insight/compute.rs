@@ -43,7 +43,7 @@ pub async fn compute_aggregate(
     type CategoryRow = (String, String, i64, i64);
     let category_rows: Vec<CategoryRow> = sqlx::query_as(
         r#"
-        SELECT COALESCE(d.category_key, 'khac') AS category_key,
+        SELECT COALESCE(e.category_key, d.category_key, 'khac') AS category_key,
                c.display_name_vi,
                COALESCE(SUM(e.amount_minor), 0)::BIGINT,
                COUNT(*)::BIGINT
@@ -51,12 +51,12 @@ pub async fn compute_aggregate(
         LEFT JOIN expense_drafts d
           ON d.submission_id = e.receipt_submission_id
          AND d.account_id = e.account_id
-        JOIN categories c ON c.key = COALESCE(d.category_key, 'khac')
+        JOIN categories c ON c.key = COALESCE(e.category_key, d.category_key, 'khac')
         WHERE e.account_id = $1
           AND e.state = 'confirmed'
           AND e.occurred_at >= $2
           AND e.occurred_at < $3
-        GROUP BY COALESCE(d.category_key, 'khac'), c.display_name_vi
+        GROUP BY COALESCE(e.category_key, d.category_key, 'khac'), c.display_name_vi
         ORDER BY SUM(e.amount_minor) DESC, c.display_name_vi ASC
         "#,
     )

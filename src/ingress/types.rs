@@ -130,6 +130,7 @@ pub struct ReceiptDraftSnapshot {
     pub amount_minor: i64,
     pub currency: String,
     pub merchant: String,
+    pub category_key: String,
     pub category_display: String,
     pub transaction_type: String,
     pub occurred_at: DateTime<Utc>,
@@ -158,6 +159,8 @@ pub struct RecentExpense {
     pub source: String,
     pub state: ExpenseState,
     pub version: i32,
+    pub category_key: String,
+    pub transaction_type: String,
 }
 
 /// Enabled or disabled summary schedule row for settings display.
@@ -191,6 +194,7 @@ pub struct DecisionContext {
     pub sender_allowed: bool,
     pub user_text: String,
     pub timezone: String,
+    pub locale: String,
     pub original_receipt_retention_days: u32,
     pub next_expense_id: Uuid,
     pub next_submission_id: Uuid,

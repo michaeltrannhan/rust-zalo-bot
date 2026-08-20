@@ -459,6 +459,7 @@ fn decide_image_active_returns_acknowledgement_copy() {
         allowlisted: true,
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
+        locale: "vi-VN".to_string(),
         original_receipt_retention_days: 7,
         remaining_daily_receipts: 20,
         confirmed_expense_count: 0,
@@ -470,6 +471,9 @@ fn decide_image_active_returns_acknowledgement_copy() {
         recent_lines: vec![],
     };
     let outcome = decide_image(&ctx, Utc::now());
-    assert_eq!(outcome.replies[0].body, image_received_text());
+    assert_eq!(
+        outcome.replies[0].body,
+        image_received_text(zl_expense::conversation::Locale::Vi)
+    );
     assert_eq!(outcome.commands.len(), 1);
 }

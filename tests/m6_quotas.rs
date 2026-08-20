@@ -149,7 +149,10 @@ async fn twentieth_daily_receipt_accepted_twenty_first_rejected_without_ingest_j
     .fetch_one(&pool)
     .await
     .expect("outbound body");
-    assert_eq!(body, daily_receipt_quota_text());
+    assert_eq!(
+        body,
+        daily_receipt_quota_text(zl_expense::conversation::Locale::Vi)
+    );
 
     let submission_count: i64 = sqlx::query_scalar(
         r#"
@@ -288,7 +291,7 @@ async fn outbound_disabled_inserts_suppressed_row_without_deliver_job() {
 fn extraction_kill_switch_copy_is_stable() {
     use zl_expense::conversation::extraction_kill_switch_text;
     assert_eq!(
-        extraction_kill_switch_text(),
+        extraction_kill_switch_text(zl_expense::conversation::Locale::Vi),
         "Trích xuất hóa đơn đang tạm tắt."
     );
 }
@@ -304,6 +307,7 @@ fn decide_image_quota_reply_matches_ingress_copy() {
         allowlisted: true,
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
+        locale: "vi-VN".to_string(),
         original_receipt_retention_days: 7,
         remaining_daily_receipts: 0,
         confirmed_expense_count: 0,
@@ -315,6 +319,9 @@ fn decide_image_quota_reply_matches_ingress_copy() {
         recent_lines: vec![],
     };
     let outcome = decide_image(&ctx, Utc::now());
-    assert_eq!(outcome.replies[0].body, daily_receipt_quota_text());
+    assert_eq!(
+        outcome.replies[0].body,
+        daily_receipt_quota_text(zl_expense::conversation::Locale::Vi)
+    );
     assert!(outcome.commands.is_empty());
 }

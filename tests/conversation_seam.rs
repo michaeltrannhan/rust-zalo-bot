@@ -18,6 +18,7 @@ fn active_ctx(account_id: Uuid) -> AccountContext {
         allowlisted: true,
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
+        locale: "vi-VN".to_string(),
         original_receipt_retention_days: 7,
         remaining_daily_receipts: 20,
         confirmed_expense_count: 0,
@@ -39,6 +40,7 @@ fn pending_consent_ctx(account_id: Uuid) -> AccountContext {
         allowlisted: true,
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
+        locale: "vi-VN".to_string(),
         original_receipt_retention_days: 7,
         remaining_daily_receipts: 20,
         confirmed_expense_count: 0,
@@ -66,9 +68,12 @@ fn sample_pending(
             amount_minor: 45000,
             currency: "VND".to_string(),
             merchant: "cafe".to_string(),
+            category_key: "khac".to_string(),
             category_display: "Khác".to_string(),
+            transaction_type: "expense".to_string(),
             type_label: "Chi tiêu".to_string(),
             date_display: "15/08/2026".to_string(),
+            occurred_at: Utc::now(),
         },
     }
 }
@@ -87,6 +92,7 @@ fn allowlist_denial_is_deterministic() {
         allowlisted: false,
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
+        locale: "vi-VN".to_string(),
         original_receipt_retention_days: 7,
         remaining_daily_receipts: 20,
         confirmed_expense_count: 0,
@@ -147,7 +153,8 @@ fn active_start_and_help_show_help_text() {
     let ctx = active_ctx(Uuid::new_v4());
     let start = decide(&ctx, "/start", Utc::now());
     let help = decide(&ctx, "/help", Utc::now());
-    assert!(first_reply(&start).contains("/today — chi tiêu hôm nay"));
+    assert!(first_reply(&start).contains("/today · /week · /month · /recent"));
+    assert!(first_reply(&start).contains("sua danh muc"));
     assert_eq!(first_reply(&start), first_reply(&help));
 }
 
@@ -171,6 +178,7 @@ fn slash_today_aliases_are_diacritics_insensitive() {
         allowlisted: true,
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
+        locale: "vi-VN".to_string(),
         original_receipt_retention_days: 7,
         remaining_daily_receipts: 20,
         confirmed_expense_count: 0,
@@ -205,6 +213,7 @@ fn slash_recent_and_history_aliases_match() {
         allowlisted: true,
         default_currency: "VND".to_string(),
         timezone: "Asia/Ho_Chi_Minh".to_string(),
+        locale: "vi-VN".to_string(),
         original_receipt_retention_days: 7,
         remaining_daily_receipts: 20,
         confirmed_expense_count: 0,
@@ -482,7 +491,10 @@ fn decide_image_at_daily_quota_returns_vietnamese_limit_copy() {
     let mut ctx = active_ctx(Uuid::new_v4());
     ctx.remaining_daily_receipts = 0;
     let outcome = decide_image(&ctx, Utc::now());
-    assert_eq!(first_reply(&outcome), daily_receipt_quota_text());
+    assert_eq!(
+        first_reply(&outcome),
+        daily_receipt_quota_text(zl_expense::conversation::Locale::Vi)
+    );
     assert!(outcome.commands.is_empty());
 }
 
@@ -585,9 +597,12 @@ fn pending_delete_ok_confirms_without_content_in_reply() {
             amount_minor: 0,
             currency: "VND".to_string(),
             merchant: "secret-merchant".to_string(),
+            category_key: "khac".to_string(),
             category_display: String::new(),
+            transaction_type: "expense".to_string(),
             type_label: String::new(),
             date_display: String::new(),
+            occurred_at: Utc::now(),
         },
     });
     let outcome = decide(&ctx, "ok", Utc::now());
@@ -611,4 +626,97 @@ fn slash_export_never_mentions_filesystem_paths() {
     assert!(!body.contains(".json"));
     assert!(!body.contains(".csv"));
     assert!(!body.contains("exports/"));
+}
+
+#[test]
+fn parse_edit_category_and_lang_intents() {
+    use zl_expense::conversation::{IntentKind, parse_intent};
+    let cat = parse_intent("sua danh muc an-uong", "VND");
+    assert_eq!(cat.kind, IntentKind::EditCategory);
+    assert_eq!(cat.category_key, "an-uong");
+
+    let merchant = parse_intent("edit merchant Circle K", "VND");
+    assert_eq!(merchant.kind, IntentKind::EditMerchant);
+    assert_eq!(merchant.merchant, "Circle K");
+
+    let lang = parse_intent("/lang en", "VND");
+    assert_eq!(lang.kind, IntentKind::SetLanguage);
+    assert_eq!(lang.locale, "en-US");
+
+    let recat = parse_intent("phan loai Food & drink", "VND");
+    assert_eq!(recat.kind, IntentKind::RecategorizeLatest);
+    assert_eq!(recat.category_key, "an-uong");
+
+    let list = parse_intent("/categories", "VND");
+    assert_eq!(list.kind, IntentKind::ListCategories);
+}
+
+#[test]
+fn pending_receipt_edit_category_rewrites_card() {
+    let mut ctx = active_ctx(Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    ctx.pending = Some(PendingConfirmation {
+        kind: PendingKind::ReceiptReview,
+        reference_id: submission_id,
+        optimistic_version: 1,
+        expires_at: Utc::now() + Duration::minutes(10),
+        draft: ManualDraftView {
+            version: 1,
+            amount_minor: 45000,
+            currency: "VND".to_string(),
+            merchant: "cafe".to_string(),
+            category_key: "khac".to_string(),
+            category_display: "Khác".to_string(),
+            transaction_type: "expense".to_string(),
+            type_label: "Chi tiêu".to_string(),
+            date_display: "15/08/2026".to_string(),
+            occurred_at: Utc::now(),
+        },
+    });
+    let outcome = decide(&ctx, "sua danh muc an-uong", Utc::now());
+    assert!(first_reply(&outcome).contains("Ăn uống"));
+    assert!(matches!(
+        outcome.commands.as_slice(),
+        [DomainCommand::EditReceiptDraft {
+            category_key: Some(key),
+            ..
+        }] if key == "an-uong"
+    ));
+}
+
+#[test]
+fn lang_en_switches_help_language() {
+    let mut ctx = active_ctx(Uuid::new_v4());
+    let outcome = decide(&ctx, "/lang en", Utc::now());
+    assert!(first_reply(&outcome).contains("Switched to English"));
+    assert_eq!(
+        outcome.commands,
+        vec![DomainCommand::SetLocale {
+            locale: "en-US".to_string()
+        }]
+    );
+    ctx.locale = "en-US".to_string();
+    let help = decide(&ctx, "/help", Utc::now());
+    assert!(first_reply(&help).contains("While a review card is open"));
+}
+
+#[test]
+fn recategorize_latest_uses_recent_line() {
+    let mut ctx = active_ctx(Uuid::new_v4());
+    ctx.recent_lines = vec![RecentExpenseLine {
+        date_display: "15/08/2026".to_string(),
+        amount_minor: 45000,
+        currency: "VND".to_string(),
+        merchant: "cafe".to_string(),
+        category_display: "Khác".to_string(),
+        type_label: Some("Chi tiêu".to_string()),
+    }];
+    let outcome = decide(&ctx, "/recat an-uong", Utc::now());
+    assert!(first_reply(&outcome).contains("Ăn uống"));
+    assert_eq!(
+        outcome.commands,
+        vec![DomainCommand::RecategorizeLatest {
+            category_key: "an-uong".to_string()
+        }]
+    );
 }

@@ -53,7 +53,26 @@ pub enum IngressEffect {
     EditReceiptDraft {
         submission_id: Uuid,
         expected_draft_version: i32,
-        amount_minor: i64,
+        amount_minor: Option<i64>,
+        merchant: Option<String>,
+        category_key: Option<String>,
+        occurred_at: Option<DateTime<Utc>>,
+        transaction_type: Option<String>,
+    },
+    EditManualExpense {
+        expense_id: Uuid,
+        expected_version: i32,
+        amount_minor: Option<i64>,
+        merchant: Option<String>,
+        category_key: Option<String>,
+        occurred_at: Option<DateTime<Utc>>,
+        transaction_type: Option<String>,
+    },
+    RecategorizeLatest {
+        category_key: String,
+    },
+    SetLocale {
+        locale: String,
     },
     SetTimezone {
         iana: String,

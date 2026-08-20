@@ -26,6 +26,7 @@ use super::types::{
 };
 use super::validate::{
     object_key, validate_amount_minor, validate_currency, validate_image, validate_merchant,
+    validate_transaction_type,
 };
 
 /// Deep receipt lifecycle module backed by PostgreSQL and a pluggable object store.
@@ -324,6 +325,21 @@ impl ReceiptLifecycle {
             )
             .await?;
             next.occurred_at = occurred_at;
+        }
+        if let Some(ref transaction_type) = request.transaction_type {
+            validate_transaction_type(transaction_type)?;
+            if transaction_type != &draft.transaction_type {
+                record_correction(
+                    tx,
+                    draft.draft_id,
+                    request.submission_id,
+                    "transaction_type",
+                    Some(draft.transaction_type.clone()),
+                    Some(transaction_type.clone()),
+                )
+                .await?;
+                next.transaction_type = transaction_type.clone();
+            }
         }
 
         next.version = request.expected_version;
@@ -1731,7 +1747,8 @@ async fn update_draft(
             currency = $4,
             merchant = $5,
             category_key = $6,
-            occurred_at = $7,
+            transaction_type = $7,
+            occurred_at = $8,
             version = version + 1,
             updated_at = NOW()
         WHERE id = $1 AND version = $2
@@ -1743,6 +1760,7 @@ async fn update_draft(
     .bind(&draft.currency)
     .bind(&draft.merchant)
     .bind(&draft.category_key)
+    .bind(&draft.transaction_type)
     .bind(draft.occurred_at)
     .execute(&mut **tx)
     .await
@@ -1804,9 +1822,9 @@ async fn insert_confirmed_expense(
         r#"
         INSERT INTO expenses (
             id, account_id, amount_minor, currency, occurred_at, description,
-            source, state, receipt_submission_id
+            source, state, receipt_submission_id, category_key, transaction_type
         )
-        VALUES ($1, $2, $3, $4, $5, $6, 'receipt', 'confirmed', $7)
+        VALUES ($1, $2, $3, $4, $5, $6, 'receipt', 'confirmed', $7, $8, $9)
         ON CONFLICT (receipt_submission_id) WHERE receipt_submission_id IS NOT NULL DO NOTHING
         "#,
     )
@@ -1817,6 +1835,8 @@ async fn insert_confirmed_expense(
     .bind(draft.occurred_at)
     .bind(&draft.merchant)
     .bind(submission_id)
+    .bind(&draft.category_key)
+    .bind(&draft.transaction_type)
     .execute(&mut **tx)
     .await
     .map_err(|_| dependency("expense insert failed"))?;

@@ -154,6 +154,13 @@ pub fn validate_merchant(merchant: &str) -> Result<String, ReceiptError> {
     Ok(trimmed.to_string())
 }
 
+pub fn validate_transaction_type(transaction_type: &str) -> Result<(), ReceiptError> {
+    match transaction_type {
+        "expense" | "income" | "refund" | "transfer" | "adjustment" => Ok(()),
+        _ => Err(ReceiptError::validation("transaction_type is not allowed")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

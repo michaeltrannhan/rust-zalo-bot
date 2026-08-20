@@ -397,6 +397,7 @@ pub struct EditDraftRequest {
     pub merchant: Option<String>,
     pub category_key: Option<String>,
     pub occurred_at: Option<DateTime<Utc>>,
+    pub transaction_type: Option<String>,
 }
 
 impl fmt::Debug for EditDraftRequest {
@@ -411,6 +412,7 @@ impl fmt::Debug for EditDraftRequest {
             .field("merchant", &redacted_opt(&self.merchant))
             .field("category_key", &self.category_key)
             .field("occurred_at", &redacted_opt(&self.occurred_at))
+            .field("transaction_type", &self.transaction_type)
             .finish()
     }
 }

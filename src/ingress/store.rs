@@ -210,6 +210,7 @@ impl IngressStore {
                 sender_allowed: false,
                 user_text: request.user_text.clone(),
                 timezone: "Asia/Ho_Chi_Minh".to_string(),
+                locale: "vi-VN".to_string(),
                 original_receipt_retention_days: 7,
                 next_expense_id: Uuid::new_v4(),
                 next_submission_id: Uuid::new_v4(),
@@ -503,14 +504,14 @@ async fn load_decision_context(
     .await
     .map_err(|_| IngressEffectError::InvalidTransition)?;
 
-    let account_preferences: (String, i32, String) = sqlx::query_as(
-        "SELECT timezone, retention_preference_days, default_currency FROM accounts WHERE id = $1",
+    let account_preferences: (String, i32, String, String) = sqlx::query_as(
+        "SELECT timezone, retention_preference_days, default_currency, locale FROM accounts WHERE id = $1",
     )
     .bind(account_id)
     .fetch_one(&mut **tx)
     .await
     .map_err(|_| IngressEffectError::InvalidTransition)?;
-    let (timezone, retention_days, default_currency) = account_preferences;
+    let (timezone, retention_days, default_currency, locale) = account_preferences;
 
     let today_total: Option<(i64, i64, String)> = sqlx::query_as(
         r#"
@@ -613,11 +614,14 @@ async fn load_decision_context(
         String,
         String,
         i32,
+        String,
+        String,
     );
 
     let recent_rows: Vec<RecentExpenseRow> = sqlx::query_as(
         r#"
-        SELECT id, amount_minor, currency, occurred_at, description, source, state, version
+        SELECT id, amount_minor, currency, occurred_at, description, source, state, version,
+               COALESCE(category_key, 'khac'), COALESCE(transaction_type, 'expense')
         FROM expenses
         WHERE account_id = $1
         ORDER BY occurred_at DESC, created_at DESC
@@ -632,7 +636,18 @@ async fn load_decision_context(
     let recent_expenses: Vec<RecentExpense> = recent_rows
         .into_iter()
         .filter_map(
-            |(id, amount_minor, currency, occurred_at, description, source, state, version)| {
+            |(
+                id,
+                amount_minor,
+                currency,
+                occurred_at,
+                description,
+                source,
+                state,
+                version,
+                category_key,
+                transaction_type,
+            )| {
                 state
                     .parse::<ExpenseState>()
                     .ok()
@@ -645,6 +660,8 @@ async fn load_decision_context(
                         source,
                         state: expense_state,
                         version,
+                        category_key,
+                        transaction_type,
                     })
             },
         )
@@ -667,7 +684,8 @@ async fn load_decision_context(
                 } else {
                     let row: Option<RecentExpenseRow> = sqlx::query_as(
                         r#"
-                        SELECT id, amount_minor, currency, occurred_at, description, source, state, version
+                        SELECT id, amount_minor, currency, occurred_at, description, source, state, version,
+                               COALESCE(category_key, 'khac'), COALESCE(transaction_type, 'expense')
                         FROM expenses
                         WHERE account_id = $1 AND id = $2
                         "#,
@@ -687,6 +705,8 @@ async fn load_decision_context(
                             source,
                             state,
                             version,
+                            category_key,
+                            transaction_type,
                         )| {
                             state
                                 .parse::<ExpenseState>()
@@ -700,6 +720,8 @@ async fn load_decision_context(
                                     source,
                                     state: expense_state,
                                     version,
+                                    category_key,
+                                    transaction_type,
                                 })
                         },
                     )
@@ -772,6 +794,7 @@ async fn load_decision_context(
         sender_allowed: true,
         user_text: request.user_text.clone(),
         timezone,
+        locale,
         original_receipt_retention_days: retention_days as u32,
         next_expense_id: Uuid::new_v4(),
         next_submission_id: Uuid::new_v4(),
@@ -789,6 +812,7 @@ type ReceiptDraftRow = (
     String,
     String,
     String,
+    String,
     DateTime<Utc>,
     i32,
 );
@@ -798,6 +822,13 @@ async fn load_receipt_draft_snapshot(
     account_id: Uuid,
     submission_id: Uuid,
 ) -> Result<Option<ReceiptDraftSnapshot>, IngressEffectError> {
+    let locale: String = sqlx::query_scalar("SELECT locale FROM accounts WHERE id = $1")
+        .bind(account_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|_| IngressEffectError::InvalidTransition)?;
+    let use_en = locale.to_ascii_lowercase().starts_with("en");
+
     let row: Option<ReceiptDraftRow> = sqlx::query_as(
         r#"
         SELECT
@@ -805,7 +836,8 @@ async fn load_receipt_draft_snapshot(
             d.amount_minor,
             d.currency,
             d.merchant,
-            c.display_name_vi,
+            d.category_key,
+            CASE WHEN $3 THEN c.display_name_en ELSE c.display_name_vi END,
             d.transaction_type,
             d.occurred_at,
             d.version
@@ -821,6 +853,7 @@ async fn load_receipt_draft_snapshot(
     )
     .bind(submission_id)
     .bind(account_id)
+    .bind(use_en)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|_| IngressEffectError::InvalidTransition)?;
@@ -831,6 +864,7 @@ async fn load_receipt_draft_snapshot(
             amount_minor,
             currency,
             merchant,
+            category_key,
             category_display,
             transaction_type,
             occurred_at,
@@ -840,6 +874,7 @@ async fn load_receipt_draft_snapshot(
             amount_minor,
             currency,
             merchant,
+            category_key,
             category_display,
             transaction_type,
             occurred_at,
@@ -931,9 +966,9 @@ async fn apply_effect(
                 r#"
                 INSERT INTO expenses (
                     id, account_id, amount_minor, currency, occurred_at, description, source, state,
-                    version
+                    version, category_key, transaction_type
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, 'manual', 'awaiting_confirmation', $7)
+                VALUES ($1, $2, $3, $4, $5, $6, 'manual', 'awaiting_confirmation', $7, 'khac', 'expense')
                 "#,
             )
             .bind(expense_id)
@@ -1065,7 +1100,15 @@ async fn apply_effect(
             .await
             .map_err(|_| IngressEffectError::InvalidTransition)?;
             if quota.exceeded() {
-                return Ok(Some(daily_receipt_quota_text()));
+                let locale_raw: String =
+                    sqlx::query_scalar("SELECT locale FROM accounts WHERE id = $1")
+                        .bind(account_id)
+                        .fetch_one(&mut **tx)
+                        .await
+                        .unwrap_or_else(|_| "vi-VN".to_string());
+                return Ok(Some(daily_receipt_quota_text(
+                    crate::conversation::Locale::parse(&locale_raw),
+                )));
             }
             receipt
                 .accept_submission_in_transaction(
@@ -1120,6 +1163,10 @@ async fn apply_effect(
             submission_id,
             expected_draft_version,
             amount_minor,
+            merchant,
+            category_key,
+            occurred_at,
+            transaction_type,
         } => {
             let receipt = receipt.ok_or(IngressEffectError::InvalidTransition)?;
             receipt
@@ -1129,15 +1176,63 @@ async fn apply_effect(
                         account_id,
                         submission_id: *submission_id,
                         expected_version: *expected_draft_version,
-                        amount_minor: Some(*amount_minor),
+                        amount_minor: *amount_minor,
                         currency: None,
-                        merchant: None,
-                        category_key: None,
-                        occurred_at: None,
+                        merchant: merchant.clone(),
+                        category_key: category_key.clone(),
+                        occurred_at: *occurred_at,
+                        transaction_type: transaction_type.clone(),
                     },
                 )
                 .await
                 .map_err(map_receipt_error)?;
+        }
+        IngressEffect::EditManualExpense {
+            expense_id,
+            expected_version,
+            amount_minor,
+            merchant,
+            category_key,
+            occurred_at,
+            transaction_type,
+        } => {
+            edit_manual_expense_in_transaction(
+                tx,
+                account_id,
+                *expense_id,
+                *expected_version,
+                amount_minor.as_ref().copied(),
+                merchant.as_deref(),
+                category_key.as_deref(),
+                occurred_at.as_ref().copied(),
+                transaction_type.as_deref(),
+            )
+            .await?;
+        }
+        IngressEffect::RecategorizeLatest { category_key } => {
+            recategorize_latest_in_transaction(tx, account_id, category_key).await?;
+        }
+        IngressEffect::SetLocale { locale } => {
+            let normalized = if locale.to_ascii_lowercase().starts_with("en") {
+                "en-US"
+            } else {
+                "vi-VN"
+            };
+            let updated = sqlx::query(
+                r#"
+                UPDATE accounts
+                SET locale = $2, updated_at = NOW()
+                WHERE id = $1
+                "#,
+            )
+            .bind(account_id)
+            .bind(normalized)
+            .execute(&mut **tx)
+            .await
+            .map_err(|_| IngressEffectError::InvalidTransition)?;
+            if updated.rows_affected() == 0 {
+                return Err(IngressEffectError::NotFound);
+            }
         }
         IngressEffect::SetTimezone { iana } => {
             if parse_timezone(iana).is_err() {
@@ -1320,13 +1415,15 @@ async fn apply_effect(
         IngressEffect::RecordInsightSnapshot { period_kind } => {
             let period_kind = InsightPeriodKind::parse(period_kind)
                 .ok_or(IngressEffectError::InvalidTransition)?;
-            let preferences: (String, String) =
-                sqlx::query_as("SELECT timezone, default_currency FROM accounts WHERE id = $1")
-                    .bind(account_id)
-                    .fetch_one(&mut **tx)
-                    .await
-                    .map_err(|_| IngressEffectError::InvalidTransition)?;
-            let (timezone, default_currency) = preferences;
+            let preferences: (String, String, String) = sqlx::query_as(
+                "SELECT timezone, default_currency, locale FROM accounts WHERE id = $1",
+            )
+            .bind(account_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|_| IngressEffectError::InvalidTransition)?;
+            let (timezone, default_currency, locale_raw) = preferences;
+            let locale = crate::conversation::Locale::parse(&locale_raw);
             let (_snapshot_id, aggregate) = record_snapshot_in_transaction(
                 tx,
                 account_id,
@@ -1355,9 +1452,10 @@ async fn apply_effect(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or(default_currency.as_str());
             let body = if tx_count == 0 {
-                empty_summary_text(label)
+                empty_summary_text(locale, label)
             } else {
                 period_summary_text(
+                    locale,
                     label,
                     currency,
                     total_minor,
@@ -1413,6 +1511,153 @@ fn map_receipt_error(error: crate::receipt::ReceiptError) -> IngressEffectError 
         ErrorClass::NotFound => IngressEffectError::NotFound,
         _ => IngressEffectError::InvalidTransition,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn edit_manual_expense_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+    expense_id: Uuid,
+    expected_version: i32,
+    amount_minor: Option<i64>,
+    merchant: Option<&str>,
+    category_key: Option<&str>,
+    occurred_at: Option<DateTime<Utc>>,
+    transaction_type: Option<&str>,
+) -> Result<(), IngressEffectError> {
+    let row: Option<(i64, String, String, DateTime<Utc>, String, String)> = sqlx::query_as(
+        r#"
+        SELECT amount_minor, description, COALESCE(category_key, 'khac'), occurred_at,
+               COALESCE(transaction_type, 'expense'), currency
+        FROM expenses
+        WHERE id = $1 AND account_id = $2 AND version = $3 AND state = 'awaiting_confirmation'
+        FOR UPDATE
+        "#,
+    )
+    .bind(expense_id)
+    .bind(account_id)
+    .bind(expected_version)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| IngressEffectError::InvalidTransition)?;
+
+    let Some((cur_amount, cur_desc, cur_cat, cur_occurred, cur_type, _currency)) = row else {
+        return Err(IngressEffectError::VersionConflict);
+    };
+
+    let next_amount = amount_minor.unwrap_or(cur_amount);
+    let next_desc = merchant.unwrap_or(&cur_desc).trim();
+    if next_desc.is_empty() {
+        return Err(IngressEffectError::InvalidTransition);
+    }
+    let next_cat = category_key.unwrap_or(&cur_cat);
+    let next_occurred = occurred_at.unwrap_or(cur_occurred);
+    let next_type = transaction_type.unwrap_or(&cur_type);
+
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM categories WHERE key = $1)")
+        .bind(next_cat)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|_| IngressEffectError::InvalidTransition)?;
+    if !exists {
+        return Err(IngressEffectError::InvalidTransition);
+    }
+
+    let updated = sqlx::query(
+        r#"
+        UPDATE expenses
+        SET amount_minor = $4,
+            description = $5,
+            category_key = $6,
+            occurred_at = $7,
+            transaction_type = $8,
+            version = version + 1,
+            updated_at = NOW()
+        WHERE id = $1 AND account_id = $2 AND version = $3 AND state = 'awaiting_confirmation'
+        "#,
+    )
+    .bind(expense_id)
+    .bind(account_id)
+    .bind(expected_version)
+    .bind(next_amount)
+    .bind(next_desc)
+    .bind(next_cat)
+    .bind(next_occurred)
+    .bind(next_type)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| IngressEffectError::InvalidTransition)?;
+    if updated.rows_affected() == 0 {
+        return Err(IngressEffectError::VersionConflict);
+    }
+    Ok(())
+}
+
+async fn recategorize_latest_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+    category_key: &str,
+) -> Result<(), IngressEffectError> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM categories WHERE key = $1)")
+        .bind(category_key)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|_| IngressEffectError::InvalidTransition)?;
+    if !exists {
+        return Err(IngressEffectError::InvalidTransition);
+    }
+
+    let expense: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(
+        r#"
+        SELECT id, receipt_submission_id
+        FROM expenses
+        WHERE account_id = $1 AND state = 'confirmed'
+        ORDER BY occurred_at DESC, created_at DESC
+        LIMIT 1
+        FOR UPDATE
+        "#,
+    )
+    .bind(account_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| IngressEffectError::InvalidTransition)?;
+
+    let Some((expense_id, submission_id)) = expense else {
+        return Err(IngressEffectError::NotFound);
+    };
+
+    let updated = sqlx::query(
+        r#"
+        UPDATE expenses
+        SET category_key = $3, updated_at = NOW()
+        WHERE id = $1 AND account_id = $2
+        "#,
+    )
+    .bind(expense_id)
+    .bind(account_id)
+    .bind(category_key)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| IngressEffectError::InvalidTransition)?;
+    if updated.rows_affected() == 0 {
+        return Err(IngressEffectError::NotFound);
+    }
+
+    if let Some(submission_id) = submission_id {
+        let _ = sqlx::query(
+            r#"
+            UPDATE expense_drafts
+            SET category_key = $3, updated_at = NOW()
+            WHERE submission_id = $1 AND account_id = $2
+            "#,
+        )
+        .bind(submission_id)
+        .bind(account_id)
+        .bind(category_key)
+        .execute(&mut **tx)
+        .await;
+    }
+    Ok(())
 }
 
 async fn upsert_pending_action(
